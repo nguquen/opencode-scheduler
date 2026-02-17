@@ -13,7 +13,7 @@
  */
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "fs"
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs"
 import { basename, dirname, join, resolve as resolvePath } from "path"
 import { homedir, platform } from "os"
 import { execFileSync, execSync, spawn, type ChildProcess } from "child_process"
@@ -1188,6 +1188,206 @@ function deleteJobFile(job: Job): void {
   if (existsSync(path)) {
     unlinkSync(path)
   }
+}
+
+interface GlobalCleanupPlan {
+  scopeIds: string[]
+  jobsToUninstall: Job[]
+  scopedJobDefinitionPaths: string[]
+  legacyJobDefinitionPaths: string[]
+  lockPaths: string[]
+  runHistoryPaths: string[]
+  logPaths: string[]
+  launchdPaths: string[]
+  systemdPaths: string[]
+}
+
+interface GlobalCleanupExecution {
+  dryRun: boolean
+  includeHistory: boolean
+  removed: {
+    scopedJobDefinitions: string[]
+    legacyJobDefinitions: string[]
+    locks: string[]
+    runHistory: string[]
+    logs: string[]
+    launchdUnits: string[]
+    systemdUnits: string[]
+  }
+  errors: string[]
+}
+
+function listDirectoryFiles(
+  dir: string,
+  options?: { prefix?: string; suffix?: string }
+): string[] {
+  if (!existsSync(dir)) return []
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true })
+    return entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .filter((name) => (options?.prefix ? name.startsWith(options.prefix) : true))
+      .filter((name) => (options?.suffix ? name.endsWith(options.suffix) : true))
+      .map((name) => join(dir, name))
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+function listDirectoryNames(dir: string): string[] {
+  if (!existsSync(dir)) return []
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+function uniquePaths(paths: string[]): string[] {
+  return Array.from(new Set(paths)).sort()
+}
+
+function buildGlobalCleanupPlan(includeHistory: boolean): GlobalCleanupPlan {
+  const scopeIds = listScopeIds()
+  const scopedJobDefinitionPaths = scopeIds.flatMap((scopeId) => listDirectoryFiles(scopeJobsDir(scopeId), { suffix: ".json" }))
+  const lockPaths = scopeIds.flatMap((scopeId) => listDirectoryFiles(scopeLocksDir(scopeId), { suffix: ".json" }))
+  const runHistoryPaths = includeHistory
+    ? scopeIds.flatMap((scopeId) => listDirectoryFiles(scopeRunsDir(scopeId), { suffix: ".jsonl" }))
+    : []
+
+  const schedulerLogsRoot = join(LOGS_DIR, "scheduler")
+  const logScopeIds = listDirectoryNames(schedulerLogsRoot)
+  const logPaths = includeHistory
+    ? logScopeIds.flatMap((scopeId) => listDirectoryFiles(join(schedulerLogsRoot, scopeId), { suffix: ".log" }))
+    : []
+
+  const launchdPaths = IS_MAC
+    ? listDirectoryFiles(LAUNCH_AGENTS_DIR, { prefix: `${LAUNCHD_PREFIX}.`, suffix: ".plist" })
+    : []
+  const systemdPaths = IS_LINUX
+    ? [
+        ...listDirectoryFiles(SYSTEMD_USER_DIR, { prefix: "opencode-job-", suffix: ".service" }),
+        ...listDirectoryFiles(SYSTEMD_USER_DIR, { prefix: "opencode-job-", suffix: ".timer" }),
+      ]
+    : []
+
+  const jobsToUninstall = [...loadAllJobsAcrossScopes(), ...loadAllLegacyJobs()]
+
+  return {
+    scopeIds,
+    jobsToUninstall,
+    scopedJobDefinitionPaths: uniquePaths(scopedJobDefinitionPaths),
+    legacyJobDefinitionPaths: listDirectoryFiles(LEGACY_JOBS_DIR, { suffix: ".json" }),
+    lockPaths: uniquePaths(lockPaths),
+    runHistoryPaths: uniquePaths(runHistoryPaths),
+    logPaths: uniquePaths(logPaths),
+    launchdPaths: uniquePaths(launchdPaths),
+    systemdPaths: uniquePaths(systemdPaths),
+  }
+}
+
+function removePaths(paths: string[], errors: string[]): string[] {
+  const removed: string[] = []
+  for (const path of uniquePaths(paths)) {
+    if (!existsSync(path)) continue
+    try {
+      rmSync(path, { recursive: true, force: true })
+      removed.push(path)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      errors.push(`Failed to remove ${path}: ${msg}`)
+    }
+  }
+  return removed
+}
+
+function executeGlobalCleanup(plan: GlobalCleanupPlan, options: { dryRun: boolean; includeHistory: boolean }): GlobalCleanupExecution {
+  const errors: string[] = []
+  const dryRun = options.dryRun
+
+  if (!dryRun) {
+    for (const job of plan.jobsToUninstall) {
+      try {
+        uninstallJob(job)
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        errors.push(`Failed to uninstall scheduler entry for ${job.slug}: ${msg}`)
+      }
+    }
+  }
+
+  const removeOrPreview = (paths: string[]): string[] => {
+    if (dryRun) return uniquePaths(paths).filter((path) => existsSync(path))
+    return removePaths(paths, errors)
+  }
+
+  const removed = {
+    scopedJobDefinitions: removeOrPreview(plan.scopedJobDefinitionPaths),
+    legacyJobDefinitions: removeOrPreview(plan.legacyJobDefinitionPaths),
+    locks: removeOrPreview(plan.lockPaths),
+    runHistory: options.includeHistory ? removeOrPreview(plan.runHistoryPaths) : [],
+    logs: options.includeHistory ? removeOrPreview(plan.logPaths) : [],
+    launchdUnits: removeOrPreview(plan.launchdPaths),
+    systemdUnits: removeOrPreview(plan.systemdPaths),
+  }
+
+  return {
+    dryRun,
+    includeHistory: options.includeHistory,
+    removed,
+    errors,
+  }
+}
+
+function formatCleanupLine(label: string, count: number, location: string): string {
+  return `- ${label}: ${count} (${location})`
+}
+
+function formatGlobalCleanupOutput(execution: GlobalCleanupExecution): string {
+  const mode = execution.dryRun ? "DRY RUN (no files deleted)" : "EXECUTED"
+  const lines = [
+    `Global scheduler cleanup: ${mode}`,
+    "",
+    formatCleanupLine("Scoped job definitions", execution.removed.scopedJobDefinitions.length, `${SCOPES_DIR}/*/jobs`),
+    formatCleanupLine("Legacy job definitions", execution.removed.legacyJobDefinitions.length, LEGACY_JOBS_DIR),
+    formatCleanupLine("Lock files", execution.removed.locks.length, `${SCOPES_DIR}/*/locks`),
+  ]
+
+  if (execution.includeHistory) {
+    lines.push(formatCleanupLine("Run history", execution.removed.runHistory.length, `${SCOPES_DIR}/*/runs`))
+    lines.push(formatCleanupLine("Logs", execution.removed.logs.length, `${LOGS_DIR}/scheduler/*`))
+  } else {
+    lines.push("- Run history: skipped (set includeHistory=true)")
+    lines.push("- Logs: skipped (set includeHistory=true)")
+  }
+
+  if (IS_MAC) {
+    lines.push(formatCleanupLine("launchd plists", execution.removed.launchdUnits.length, LAUNCH_AGENTS_DIR))
+  }
+
+  if (IS_LINUX) {
+    lines.push(formatCleanupLine("systemd units", execution.removed.systemdUnits.length, SYSTEMD_USER_DIR))
+  }
+
+  if (execution.errors.length > 0) {
+    lines.push("")
+    lines.push("Errors:")
+    for (const error of execution.errors) {
+      lines.push(`- ${error}`)
+    }
+  }
+
+  if (execution.dryRun) {
+    lines.push("")
+    lines.push("Re-run with confirm=true to apply this cleanup.")
+  }
+
+  return lines.join("\n")
 }
 
 function normalizeAttachUrl(attachUrl?: string): string | undefined {
@@ -2517,6 +2717,40 @@ Commands:
           }
 
           return okResult(format, `Deleted job "${job.name}"`, { job })
+        },
+      }),
+
+      cleanup_global: tool({
+        description:
+          "Clean up scheduler artifacts globally across all scopes. Removes job definitions everywhere; optionally remove logs and run history.",
+        args: {
+          includeHistory: tool.schema
+            .boolean()
+            .optional()
+            .describe("Also remove run history and logs across all scopes (default false)."),
+          confirm: tool.schema
+            .boolean()
+            .optional()
+            .describe("Set true to execute deletion. Default is dry run with no destructive changes."),
+          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json')."),
+        },
+        async execute(args) {
+          const format = normalizeFormat(args.format)
+          const includeHistory = args.includeHistory === true
+          const dryRun = args.confirm !== true
+
+          const plan = buildGlobalCleanupPlan(includeHistory)
+          const execution = executeGlobalCleanup(plan, { dryRun, includeHistory })
+          const output = formatGlobalCleanupOutput(execution)
+
+          return okResult(format, output, {
+            dryRun: execution.dryRun,
+            includeHistory: execution.includeHistory,
+            removed: execution.removed,
+            errors: execution.errors,
+            scopeIds: plan.scopeIds,
+            jobsConsidered: plan.jobsToUninstall.length,
+          })
         },
       }),
 

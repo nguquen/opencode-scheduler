@@ -50,6 +50,7 @@ Schedule a job every 6 hours to check if my website is up and alert me on Slack 
 | Run immediately | `Run the standing-desk job now` |
 | View logs | `Show logs for standing-desk` |
 | Delete | `Delete the standing-desk job` |
+| Global cleanup (dry run) | `Run scheduler global cleanup` |
 
 ## How It Works
 
@@ -105,12 +106,37 @@ Jobs use standard 5-field cron expressions:
 | `get_job` | Fetch job details and metadata |
 | `update_job` | Update an existing job |
 | `delete_job` | Remove a scheduled job |
+| `cleanup_global` | Remove scheduler artifacts across all scopes (dry-run by default) |
 | `run_job` | Execute a job immediately (fire-and-forget) |
 | `job_logs` | View the latest logs from a job |
 
 `schedule_job` and `update_job` accept an optional `timeoutSeconds` (integer seconds). Use `0` (or omit) to disable.
 
 Tools accept an optional `format: "json"` argument to return structured output with `success`, `output`, `shouldContinue`, and `data`.
+
+### Global Cleanup
+
+Use `cleanup_global` to clean scheduler artifacts across all scopes. It always starts in dry-run mode unless you pass `confirm: true`.
+
+- Dry run (safe default):
+
+```json
+{ "confirm": false }
+```
+
+- Execute global cleanup of job definitions + lock files + scheduler units:
+
+```json
+{ "confirm": true }
+```
+
+- Also delete logs and run history:
+
+```json
+{ "confirm": true, "includeHistory": true }
+```
+
+The tool reports exactly how many artifacts were removed, grouped by location (jobs, locks, logs, runs, launchd/systemd units).
 
 ### Storage
 
