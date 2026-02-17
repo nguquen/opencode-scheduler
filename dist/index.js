@@ -12345,9 +12345,12 @@ var SUPERVISOR_PATH = join(SCHEDULER_DIR, "supervisor.pl");
 var SCHEDULER_CONFIG = join(OPENCODE_CONFIG, "opencode-scheduler.json");
 var IS_MAC = platform() === "darwin";
 var IS_LINUX = platform() === "linux";
+var IS_WINDOWS = platform() === "win32";
 var LAUNCH_AGENTS_DIR = join(homedir(), "Library", "LaunchAgents");
 var LAUNCHD_PREFIX = "com.opencode.job";
 var SYSTEMD_USER_DIR = join(homedir(), ".config", "systemd", "user");
+var WINDOWS_TASK_ROOT = "\\OpenCode";
+var WINDOWS_TASK_PREFIX = "opencode-job";
 function ensureDir(dir) {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -12994,6 +12997,132 @@ function cronToSystemdCalendars(cron) {
   }
   return calendars;
 }
+var WINDOWS_WEEKDAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+var WINDOWS_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+function pad2(value) {
+  return value.toString().padStart(2, "0");
+}
+function formatStartTime(hour, minute) {
+  return `${pad2(hour)}:${pad2(minute)}`;
+}
+function windowsTaskBaseName(job) {
+  const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir());
+  return `${WINDOWS_TASK_PREFIX}-${scopeId}-${job.slug}`;
+}
+function windowsTaskName(baseName, index, total) {
+  const suffix = total > 1 ? `-${index + 1}` : "";
+  return `${WINDOWS_TASK_ROOT}\\${baseName}${suffix}`;
+}
+function quoteWindowsArg(value) {
+  if (!/[\s"]/u.test(value))
+    return value;
+  return `"${value.replace(/"/g, '""')}"`;
+}
+function getWindowsInvocation(job) {
+  const invocation = job.invocation ?? buildOpencodeArgs(job);
+  return invocation;
+}
+function buildWindowsTaskCommand(job) {
+  const invocation = getWindowsInvocation(job);
+  return [invocation.command, ...invocation.args].map((arg) => quoteWindowsArg(arg)).join(" ");
+}
+function maybeStep(field) {
+  const match = field.match(/^\*\/(\d+)$/);
+  if (!match)
+    return null;
+  const step = parseInt(match[1], 10);
+  return Number.isFinite(step) && step > 0 ? step : null;
+}
+function ensureWindowsRepresentable(cron) {
+  const [minuteField, hourField, dayField, monthField, weekdayField] = splitCronExpression(cron);
+  const minuteStep = maybeStep(minuteField);
+  const hourStep = maybeStep(hourField);
+  if (minuteField === "*" && hourField === "*" && dayField === "*" && monthField === "*" && weekdayField === "*") {
+    return [{ schedule: "MINUTE", modifier: "1", startTime: "00:00" }];
+  }
+  if (minuteStep !== null && hourField === "*" && dayField === "*" && monthField === "*" && weekdayField === "*") {
+    if (minuteStep > 1439) {
+      throw new Error(`Windows Task Scheduler supports at most every 1439 minutes. Use ${minuteStep} with a smaller value or switch to an hourly/daily cron.`);
+    }
+    return [{ schedule: "MINUTE", modifier: String(minuteStep), startTime: "00:00" }];
+  }
+  const minuteValues = parseCronField(minuteField, 0, 59, "minute");
+  const hourValues = parseCronField(hourField, 0, 23, "hour");
+  const dayValues = parseCronField(dayField, 1, 31, "day of month");
+  const monthValues = parseCronField(monthField, 1, 12, "month");
+  const weekdayValues = parseCronField(weekdayField, 0, 7, "day of week", true);
+  if (hourStep !== null && minuteValues && minuteValues.length === 1 && dayField === "*" && monthField === "*" && weekdayField === "*") {
+    return [{ schedule: "HOURLY", modifier: String(hourStep), startTime: formatStartTime(0, minuteValues[0]) }];
+  }
+  if (!minuteValues || minuteValues.length === 0 || !hourValues || hourValues.length === 0) {
+    throw new Error("Windows Task Scheduler requires explicit minute and hour values for this cron expression. Use formats like '0 9 * * *', '30 8 * * 1', '*/15 * * * *', or '0 */6 * * *'.");
+  }
+  if (monthValues && weekdayValues) {
+    throw new Error("Windows Task Scheduler cannot combine specific months with day-of-week constraints in cron. Split this into multiple jobs (for example: one monthly job and one weekly job).");
+  }
+  if (monthValues && !dayValues) {
+    throw new Error("Windows Task Scheduler cannot represent 'every day in selected months'. Use explicit day-of-month values (for example '0 9 1,15 1,7 *') or create separate jobs.");
+  }
+  const plans = [];
+  for (const minute of minuteValues) {
+    for (const hour of hourValues) {
+      const startTime = formatStartTime(hour, minute);
+      if (dayValues && weekdayValues) {
+        plans.push({
+          schedule: "MONTHLY",
+          days: dayValues.join(","),
+          months: monthValues ? monthValues.map((value) => WINDOWS_MONTHS[value - 1]).join(",") : undefined,
+          startTime
+        });
+        plans.push({
+          schedule: "WEEKLY",
+          weekdays: weekdayValues.map((value) => WINDOWS_WEEKDAYS[value]).join(","),
+          startTime
+        });
+      } else if (weekdayValues) {
+        plans.push({
+          schedule: "WEEKLY",
+          weekdays: weekdayValues.map((value) => WINDOWS_WEEKDAYS[value]).join(","),
+          startTime
+        });
+      } else if (dayValues) {
+        plans.push({
+          schedule: "MONTHLY",
+          days: dayValues.join(","),
+          months: monthValues ? monthValues.map((value) => WINDOWS_MONTHS[value - 1]).join(",") : undefined,
+          startTime
+        });
+      } else if (monthValues) {
+        throw new Error("Windows Task Scheduler cannot represent month-only cron constraints without day-of-month. Use explicit days or create separate jobs.");
+      } else {
+        plans.push({ schedule: "DAILY", startTime });
+      }
+    }
+  }
+  return plans;
+}
+function cronToWindowsTaskDefinitions(job) {
+  const plans = ensureWindowsRepresentable(job.schedule);
+  const baseName = windowsTaskBaseName(job);
+  const command = buildWindowsTaskCommand(job);
+  return plans.map((plan, index) => {
+    const args = ["/Create", "/F", "/TN", windowsTaskName(baseName, index, plans.length), "/TR", command, "/SC", plan.schedule];
+    if (plan.modifier) {
+      args.push("/MO", plan.modifier);
+    }
+    if (plan.weekdays) {
+      args.push("/D", plan.weekdays);
+    }
+    if (plan.days) {
+      args.push("/D", plan.days);
+    }
+    if (plan.months) {
+      args.push("/M", plan.months);
+    }
+    args.push("/ST", plan.startTime);
+    return { name: windowsTaskName(baseName, index, plans.length), args };
+  });
+}
 function createLaunchdPlist(job) {
   const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir());
   const label = `${LAUNCHD_PREFIX}.${scopeId}.${job.slug}`;
@@ -13170,13 +13299,37 @@ function uninstallSystemdJob(job) {
     execSync("systemctl --user daemon-reload", { stdio: "ignore" });
   } catch {}
 }
+function installWindowsJob(job) {
+  uninstallWindowsJob(job);
+  const taskDefinitions = cronToWindowsTaskDefinitions(job);
+  for (const task of taskDefinitions) {
+    execFileSync("schtasks", task.args, { stdio: "ignore" });
+  }
+}
+function uninstallWindowsJob(job) {
+  const candidates = new Set;
+  const scopedBase = windowsTaskBaseName(job);
+  const legacyBase = `${WINDOWS_TASK_PREFIX}-${job.slug}`;
+  for (let i = 0;i < 64; i += 1) {
+    const suffix = i === 0 ? "" : `-${i + 1}`;
+    candidates.add(`${WINDOWS_TASK_ROOT}\\${scopedBase}${suffix}`);
+    candidates.add(`${WINDOWS_TASK_ROOT}\\${legacyBase}${suffix}`);
+  }
+  for (const taskName of candidates) {
+    try {
+      execFileSync("schtasks", ["/Delete", "/TN", taskName, "/F"], { stdio: "ignore" });
+    } catch {}
+  }
+}
 function installJob(job) {
   if (IS_MAC) {
     installLaunchdJob(job);
   } else if (IS_LINUX) {
     installSystemdJob(job);
+  } else if (IS_WINDOWS) {
+    installWindowsJob(job);
   } else {
-    throw new Error(`Unsupported platform: ${platform()}. Only macOS and Linux are supported.`);
+    throw new Error(`Unsupported platform: ${platform()}. Supported platforms: macOS, Linux, and Windows.`);
   }
 }
 function uninstallJob(job) {
@@ -13184,6 +13337,8 @@ function uninstallJob(job) {
     uninstallLaunchdJob(job);
   } else if (IS_LINUX) {
     uninstallSystemdJob(job);
+  } else if (IS_WINDOWS) {
+    uninstallWindowsJob(job);
   }
 }
 function ensureScopeStorage(scopeId) {
@@ -14032,7 +14187,7 @@ var SchedulerPlugin = async () => {
   return {
     tool: {
       schedule_job: tool({
-        description: "Schedule a recurring job to run an opencode prompt. Uses launchd (Mac) or systemd (Linux) for reliable scheduling that survives reboots and catches up on missed runs.",
+        description: "Schedule a recurring job to run an opencode prompt. Uses launchd (Mac), systemd (Linux), or Windows Task Scheduler.",
         args: {
           name: tool.schema.string().describe("A short name for the job (e.g. 'standing desk search')"),
           schedule: tool.schema.string().describe("Cron expression: '0 9 * * *' (daily 9am), '0 */6 * * *' (every 6h), '30 8 * * 1' (Monday 8:30am)"),
@@ -14138,7 +14293,8 @@ var SchedulerPlugin = async () => {
           try {
             saveJob(job);
             installJob(job);
-            const platformName = IS_MAC ? "launchd" : IS_LINUX ? "systemd" : "unknown";
+            const platformName = IS_MAC ? "launchd" : IS_LINUX ? "systemd" : IS_WINDOWS ? "schtasks" : "unknown";
+            const reliabilityLine = IS_WINDOWS ? "Windows note: scheduled runs use Task Scheduler directly. For advanced reliability guarantees, prefer simple cron schedules or split complex jobs." : "The job will run at the scheduled time. If your computer was asleep, it will catch up when it wakes.";
             const primaryLine = run.command ? `Command: ${run.command}${run.arguments ? ` ${run.arguments}` : ""}` : `Prompt: ${(run.prompt ?? "").slice(0, 100)}${(run.prompt ?? "").length > 100 ? "..." : ""}`;
             const attachLine = run.attachUrl ? `Attach URL: ${run.attachUrl}
 ` : "";
@@ -14149,7 +14305,7 @@ Platform: ${platformName}
 Working Directory: ${workdir}
 ${attachLine}${primaryLine}
 
-The job will run at the scheduled time. If your computer was asleep, it will catch up when it wakes.
+${reliabilityLine}
 
 Commands:
 - "run ${args.name} now" - run immediately

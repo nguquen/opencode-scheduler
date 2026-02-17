@@ -6,7 +6,7 @@ Run AI agents on a schedule. Set up recurring tasks that execute autonomously—
 Schedule a daily job at 9am to search Facebook Marketplace for posters under $100 and send the top 5 deals to my Telegram
 ```
 
-This is an [OpenCode](https://opencode.ai) plugin that uses your OS's native scheduler (launchd on Mac, systemd on Linux) to run prompts reliably—survives reboots, catches up on missed runs.
+This is an [OpenCode](https://opencode.ai) plugin that uses your OS's native scheduler (launchd on macOS, systemd on Linux, Task Scheduler on Windows) to run prompts reliably.
 
 As of `v1.2.0`, jobs are scoped by `workdir` (so different projects don't collide), and scheduled runs are supervised (no overlap + optional timeout).
 
@@ -68,6 +68,20 @@ Jobs run from the working directory where you created them, picking up your `ope
 - **No overlap**: if the previous run is still active, the next scheduled tick is skipped.
 - **Non-interactive by default**: scheduled runs force `OPENCODE_PERMISSION` to deny "question" prompts, so jobs don't hang waiting for approvals.
 - **Optional timeout**: set `timeoutSeconds` to hard-stop long runs (SIGTERM, then SIGKILL).
+
+### Platform Support
+
+| Platform | Scheduler backend | Notes |
+|------|------|------|
+| macOS | `launchd` | Full support (supervised scheduled runs) |
+| Linux | `systemd --user` | Full support (supervised scheduled runs) |
+| Windows | `schtasks` (Task Scheduler) | Supported with cron subset mapping (see limits below) |
+
+Windows Task Scheduler limits:
+
+- Cron expressions that use unsupported combinations (for example, month + weekday constraints, or month-only without explicit day-of-month) return a clear error with guidance.
+- Complex cron schedules may be expanded into multiple Windows tasks under `\\OpenCode\\opencode-job-...`.
+- Windows scheduled runs currently do **not** use the supervisor pipeline used on macOS/Linux, so no-overlap and timeout enforcement are not guaranteed by the OS integration itself.
 
 ---
 
@@ -149,6 +163,7 @@ The tool reports exactly how many artifacts were removed, grouped by location (j
 | Supervisor script | `~/.config/opencode/scheduler/supervisor.pl` |
 | launchd plists (Mac) | `~/Library/LaunchAgents/com.opencode.job.<scopeId>.*.plist` |
 | systemd units (Linux) | `~/.config/systemd/user/opencode-job-<scopeId>-*.{service,timer}` |
+| Task Scheduler entries (Windows) | `\\OpenCode\\opencode-job-<scopeId>-*` |
 
 Legacy note: older versions stored jobs in `~/.config/opencode/jobs/*.json` and used unscoped unit names. `delete_job` removes both scoped and legacy artifacts.
 
@@ -207,6 +222,7 @@ Then add `@scheduled-job-best-practices` at the top of scheduled job prompts.
 1. Check if installed:
    - Mac: `launchctl list | grep opencode`
    - Linux: `systemctl --user list-timers | grep opencode`
+   - Windows: `schtasks /Query /TN "\\OpenCode\\opencode-job-*"`
 
 2. Check logs: `Show logs for my-job`
 

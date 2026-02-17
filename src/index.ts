@@ -1,13 +1,13 @@
 /**
  * OpenCode Scheduler Plugin
  *
- * Schedule recurring jobs using launchd (Mac) or systemd (Linux).
+ * Schedule recurring jobs using launchd (Mac), systemd (Linux), or schtasks (Windows).
  * Jobs are stored under ~/.config/opencode/scheduler/ (scoped by workdir).
  *
  * Features:
  * - Survives reboots
  * - Catches up on missed runs (if computer was asleep)
- * - Cross-platform (Mac + Linux)
+ * - Cross-platform (Mac + Linux + Windows)
  * - Working directory support for MCP configs
  * - Environment variable injection (PATH for node/npx)
  */
@@ -31,6 +31,7 @@ const SCHEDULER_CONFIG = join(OPENCODE_CONFIG, "opencode-scheduler.json")
 // Platform detection
 const IS_MAC = platform() === "darwin"
 const IS_LINUX = platform() === "linux"
+const IS_WINDOWS = platform() === "win32"
 
 // launchd paths (Mac)
 const LAUNCH_AGENTS_DIR = join(homedir(), "Library", "LaunchAgents")
@@ -38,6 +39,10 @@ const LAUNCHD_PREFIX = "com.opencode.job"
 
 // systemd paths (Linux)
 const SYSTEMD_USER_DIR = join(homedir(), ".config", "systemd", "user")
+
+// Windows Task Scheduler
+const WINDOWS_TASK_ROOT = "\\OpenCode"
+const WINDOWS_TASK_PREFIX = "opencode-job"
 
 // Ensure directory exists
 function ensureDir(dir: string) {
@@ -848,6 +853,182 @@ function cronToSystemdCalendars(cron: string): string[] {
   return calendars
 }
 
+const WINDOWS_WEEKDAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
+const WINDOWS_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+interface WindowsTaskDefinition {
+  name: string
+  args: string[]
+}
+
+interface WindowsCronPlan {
+  schedule: "MINUTE" | "HOURLY" | "DAILY" | "WEEKLY" | "MONTHLY"
+  modifier?: string
+  weekdays?: string
+  days?: string
+  months?: string
+  startTime: string
+}
+
+function pad2(value: number): string {
+  return value.toString().padStart(2, "0")
+}
+
+function formatStartTime(hour: number, minute: number): string {
+  return `${pad2(hour)}:${pad2(minute)}`
+}
+
+function windowsTaskBaseName(job: Job): string {
+  const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir())
+  return `${WINDOWS_TASK_PREFIX}-${scopeId}-${job.slug}`
+}
+
+function windowsTaskName(baseName: string, index: number, total: number): string {
+  const suffix = total > 1 ? `-${index + 1}` : ""
+  return `${WINDOWS_TASK_ROOT}\\${baseName}${suffix}`
+}
+
+function quoteWindowsArg(value: string): string {
+  if (!/[\s"]/u.test(value)) return value
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+function getWindowsInvocation(job: Job): JobInvocation {
+  const invocation = job.invocation ?? buildOpencodeArgs(job)
+  return invocation
+}
+
+function buildWindowsTaskCommand(job: Job): string {
+  const invocation = getWindowsInvocation(job)
+  return [invocation.command, ...invocation.args].map((arg) => quoteWindowsArg(arg)).join(" ")
+}
+
+function maybeStep(field: string): number | null {
+  const match = field.match(/^\*\/(\d+)$/)
+  if (!match) return null
+  const step = parseInt(match[1], 10)
+  return Number.isFinite(step) && step > 0 ? step : null
+}
+
+function ensureWindowsRepresentable(cron: string): WindowsCronPlan[] {
+  const [minuteField, hourField, dayField, monthField, weekdayField] = splitCronExpression(cron)
+
+  const minuteStep = maybeStep(minuteField)
+  const hourStep = maybeStep(hourField)
+
+  if (minuteField === "*" && hourField === "*" && dayField === "*" && monthField === "*" && weekdayField === "*") {
+    return [{ schedule: "MINUTE", modifier: "1", startTime: "00:00" }]
+  }
+
+  if (minuteStep !== null && hourField === "*" && dayField === "*" && monthField === "*" && weekdayField === "*") {
+    if (minuteStep > 1439) {
+      throw new Error(
+        `Windows Task Scheduler supports at most every 1439 minutes. Use ${minuteStep} with a smaller value or switch to an hourly/daily cron.`
+      )
+    }
+    return [{ schedule: "MINUTE", modifier: String(minuteStep), startTime: "00:00" }]
+  }
+
+  const minuteValues = parseCronField(minuteField, 0, 59, "minute")
+  const hourValues = parseCronField(hourField, 0, 23, "hour")
+  const dayValues = parseCronField(dayField, 1, 31, "day of month")
+  const monthValues = parseCronField(monthField, 1, 12, "month")
+  const weekdayValues = parseCronField(weekdayField, 0, 7, "day of week", true)
+
+  if (hourStep !== null && minuteValues && minuteValues.length === 1 && dayField === "*" && monthField === "*" && weekdayField === "*") {
+    return [{ schedule: "HOURLY", modifier: String(hourStep), startTime: formatStartTime(0, minuteValues[0]) }]
+  }
+
+  if (!minuteValues || minuteValues.length === 0 || !hourValues || hourValues.length === 0) {
+    throw new Error(
+      "Windows Task Scheduler requires explicit minute and hour values for this cron expression. Use formats like '0 9 * * *', '30 8 * * 1', '*/15 * * * *', or '0 */6 * * *'."
+    )
+  }
+
+  if (monthValues && weekdayValues) {
+    throw new Error(
+      "Windows Task Scheduler cannot combine specific months with day-of-week constraints in cron. Split this into multiple jobs (for example: one monthly job and one weekly job)."
+    )
+  }
+
+  if (monthValues && !dayValues) {
+    throw new Error(
+      "Windows Task Scheduler cannot represent 'every day in selected months'. Use explicit day-of-month values (for example '0 9 1,15 1,7 *') or create separate jobs."
+    )
+  }
+
+  const plans: WindowsCronPlan[] = []
+  for (const minute of minuteValues) {
+    for (const hour of hourValues) {
+      const startTime = formatStartTime(hour, minute)
+
+      if (dayValues && weekdayValues) {
+        plans.push({
+          schedule: "MONTHLY",
+          days: dayValues.join(","),
+          months: monthValues ? monthValues.map((value) => WINDOWS_MONTHS[value - 1]).join(",") : undefined,
+          startTime,
+        })
+        plans.push({
+          schedule: "WEEKLY",
+          weekdays: weekdayValues.map((value) => WINDOWS_WEEKDAYS[value]).join(","),
+          startTime,
+        })
+      } else if (weekdayValues) {
+        plans.push({
+          schedule: "WEEKLY",
+          weekdays: weekdayValues.map((value) => WINDOWS_WEEKDAYS[value]).join(","),
+          startTime,
+        })
+      } else if (dayValues) {
+        plans.push({
+          schedule: "MONTHLY",
+          days: dayValues.join(","),
+          months: monthValues ? monthValues.map((value) => WINDOWS_MONTHS[value - 1]).join(",") : undefined,
+          startTime,
+        })
+      } else if (monthValues) {
+        throw new Error(
+          "Windows Task Scheduler cannot represent month-only cron constraints without day-of-month. Use explicit days or create separate jobs."
+        )
+      } else {
+        plans.push({ schedule: "DAILY", startTime })
+      }
+    }
+  }
+
+  return plans
+}
+
+function cronToWindowsTaskDefinitions(job: Job): WindowsTaskDefinition[] {
+  const plans = ensureWindowsRepresentable(job.schedule)
+  const baseName = windowsTaskBaseName(job)
+  const command = buildWindowsTaskCommand(job)
+
+  return plans.map((plan, index) => {
+    const args = ["/Create", "/F", "/TN", windowsTaskName(baseName, index, plans.length), "/TR", command, "/SC", plan.schedule]
+
+    if (plan.modifier) {
+      args.push("/MO", plan.modifier)
+    }
+
+    if (plan.weekdays) {
+      args.push("/D", plan.weekdays)
+    }
+
+    if (plan.days) {
+      args.push("/D", plan.days)
+    }
+
+    if (plan.months) {
+      args.push("/M", plan.months)
+    }
+
+    args.push("/ST", plan.startTime)
+    return { name: windowsTaskName(baseName, index, plans.length), args }
+  })
+}
+
 // === LAUNCHD (Mac) ===
 
 function createLaunchdPlist(job: Job): string {
@@ -1067,6 +1248,36 @@ function uninstallSystemdJob(job: Job): void {
   } catch {}
 }
 
+// === WINDOWS TASK SCHEDULER ===
+
+function installWindowsJob(job: Job): void {
+  // Remove stale task variants before (re)creating current definitions.
+  uninstallWindowsJob(job)
+
+  const taskDefinitions = cronToWindowsTaskDefinitions(job)
+  for (const task of taskDefinitions) {
+    execFileSync("schtasks", task.args, { stdio: "ignore" })
+  }
+}
+
+function uninstallWindowsJob(job: Job): void {
+  const candidates = new Set<string>()
+  const scopedBase = windowsTaskBaseName(job)
+  const legacyBase = `${WINDOWS_TASK_PREFIX}-${job.slug}`
+
+  for (let i = 0; i < 64; i += 1) {
+    const suffix = i === 0 ? "" : `-${i + 1}`
+    candidates.add(`${WINDOWS_TASK_ROOT}\\${scopedBase}${suffix}`)
+    candidates.add(`${WINDOWS_TASK_ROOT}\\${legacyBase}${suffix}`)
+  }
+
+  for (const taskName of candidates) {
+    try {
+      execFileSync("schtasks", ["/Delete", "/TN", taskName, "/F"], { stdio: "ignore" })
+    } catch {}
+  }
+}
+
 // === CROSS-PLATFORM ===
 
 function installJob(job: Job): void {
@@ -1074,8 +1285,10 @@ function installJob(job: Job): void {
     installLaunchdJob(job)
   } else if (IS_LINUX) {
     installSystemdJob(job)
+  } else if (IS_WINDOWS) {
+    installWindowsJob(job)
   } else {
-    throw new Error(`Unsupported platform: ${platform()}. Only macOS and Linux are supported.`)
+    throw new Error(`Unsupported platform: ${platform()}. Supported platforms: macOS, Linux, and Windows.`)
   }
 }
 
@@ -1084,6 +1297,8 @@ function uninstallJob(job: Job): void {
     uninstallLaunchdJob(job)
   } else if (IS_LINUX) {
     uninstallSystemdJob(job)
+  } else if (IS_WINDOWS) {
+    uninstallWindowsJob(job)
   }
 }
 
@@ -2127,8 +2342,8 @@ export const SchedulerPlugin: Plugin = async () => {
   return {
     tool: {
        schedule_job: tool({
-         description:
-           "Schedule a recurring job to run an opencode prompt. Uses launchd (Mac) or systemd (Linux) for reliable scheduling that survives reboots and catches up on missed runs.",
+           description:
+            "Schedule a recurring job to run an opencode prompt. Uses launchd (Mac), systemd (Linux), or Windows Task Scheduler.",
           args: {
            name: tool.schema.string().describe("A short name for the job (e.g. 'standing desk search')"),
            schedule: tool.schema
@@ -2275,10 +2490,13 @@ export const SchedulerPlugin: Plugin = async () => {
              saveJob(job)
              installJob(job)
 
-            const platformName = IS_MAC ? "launchd" : IS_LINUX ? "systemd" : "unknown"
-            const primaryLine = run.command
-              ? `Command: ${run.command}${run.arguments ? ` ${run.arguments}` : ""}`
-              : `Prompt: ${(run.prompt ?? "").slice(0, 100)}${(run.prompt ?? "").length > 100 ? "..." : ""}`
+             const platformName = IS_MAC ? "launchd" : IS_LINUX ? "systemd" : IS_WINDOWS ? "schtasks" : "unknown"
+             const reliabilityLine = IS_WINDOWS
+               ? "Windows note: scheduled runs use Task Scheduler directly. For advanced reliability guarantees, prefer simple cron schedules or split complex jobs."
+               : "The job will run at the scheduled time. If your computer was asleep, it will catch up when it wakes."
+             const primaryLine = run.command
+               ? `Command: ${run.command}${run.arguments ? ` ${run.arguments}` : ""}`
+               : `Prompt: ${(run.prompt ?? "").slice(0, 100)}${(run.prompt ?? "").length > 100 ? "..." : ""}`
 
             const attachLine = run.attachUrl ? `Attach URL: ${run.attachUrl}
 ` : ""
@@ -2292,7 +2510,7 @@ Platform: ${platformName}
 Working Directory: ${workdir}
 ${attachLine}${primaryLine}
 
-The job will run at the scheduled time. If your computer was asleep, it will catch up when it wakes.
+${reliabilityLine}
 
 Commands:
 - "run ${args.name} now" - run immediately
