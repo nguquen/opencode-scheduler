@@ -6,7 +6,7 @@ Run AI agents on a schedule. Set up recurring tasks that execute autonomously—
 Schedule a daily job at 9am to search Facebook Marketplace for posters under $100 and send the top 5 deals to my Telegram
 ```
 
-This is an [OpenCode](https://opencode.ai) plugin that uses your OS's native scheduler (launchd on macOS, systemd on Linux, Task Scheduler on Windows) to run prompts reliably.
+This is an [OpenCode](https://opencode.ai) plugin that uses your OS's native scheduler (launchd on macOS, systemd on Linux, Task Scheduler on Windows), with cron fallback where native backends are unavailable.
 
 As of `v1.2.0`, jobs are scoped by `workdir` (so different projects don't collide), and scheduled runs are supervised (no overlap + optional timeout).
 
@@ -74,7 +74,8 @@ Jobs run from the working directory where you created them, picking up your `ope
 | Platform | Scheduler backend | Notes |
 |------|------|------|
 | macOS | `launchd` | Full support (supervised scheduled runs) |
-| Linux | `systemd --user` | Full support (supervised scheduled runs) |
+| Linux (systemd available) | `systemd --user` | Full support (supervised scheduled runs) |
+| Linux / POSIX (no systemd) | `cron` (`crontab`) | Fallback backend (no missed-run catch-up) |
 | Windows | `schtasks` (Task Scheduler) | Supported with cron subset mapping (see limits below) |
 
 Windows Task Scheduler limits:
@@ -195,7 +196,7 @@ Update the standing-desk job to use attachUrl http://localhost:4096
 
 ## Project Philosophy
 
-- This plugin is intentionally a thin wrapper: it schedules `opencode run` via launchd (Mac) or systemd (Linux).
+- This plugin is intentionally a thin wrapper: it schedules `opencode run` via launchd/systemd/schtasks, with cron fallback when native backends are unavailable.
 - Logs are the source of truth for scheduled runs: `~/.config/opencode/logs/*.log`.
 - Resiliency/reporting roadmap (not implemented): `PRD-resilient-execution.md`.
 

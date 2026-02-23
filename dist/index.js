@@ -12351,6 +12351,7 @@ var LAUNCHD_PREFIX = "com.opencode.job";
 var SYSTEMD_USER_DIR = join(homedir(), ".config", "systemd", "user");
 var WINDOWS_TASK_ROOT = "\\OpenCode";
 var WINDOWS_TASK_PREFIX = "opencode-job";
+var CRON_MANAGED_PREFIX = "opencode-scheduler";
 function ensureDir(dir) {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -13321,25 +13322,197 @@ function uninstallWindowsJob(job) {
     } catch {}
   }
 }
+function isCommandAvailable(command) {
+  try {
+    execSync(`command -v ${command}`, {
+      stdio: "ignore",
+      env: buildRunEnvironment()
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isSystemdUserAvailable() {
+  if (!IS_LINUX)
+    return false;
+  if (!isCommandAvailable("systemctl"))
+    return false;
+  try {
+    execSync("systemctl --user show-environment", {
+      stdio: "ignore",
+      env: buildRunEnvironment()
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isCronAvailable() {
+  if (IS_WINDOWS)
+    return false;
+  return isCommandAvailable("crontab");
+}
+function cronBlockId(job) {
+  const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir());
+  return `${scopeId}:${job.slug}`;
+}
+function cronLegacyBlockId(job) {
+  return `legacy:${job.slug}`;
+}
+function cronBlockStart(id) {
+  return `# BEGIN ${CRON_MANAGED_PREFIX} ${id}`;
+}
+function cronBlockEnd(id) {
+  return `# END ${CRON_MANAGED_PREFIX} ${id}`;
+}
+function shellEscapeDoubleQuoted(value) {
+  return value.replace(/(["\\$`])/g, "\\$1");
+}
+function readUserCrontab() {
+  try {
+    return execFileSync("crontab", ["-l"], { encoding: "utf-8" });
+  } catch (error45) {
+    const status = typeof error45 === "object" && error45 !== null ? error45.status : undefined;
+    const stderrValue = typeof error45 === "object" && error45 !== null && "stderr" in error45 ? error45.stderr : undefined;
+    const stderr = Buffer.isBuffer(stderrValue) ? stderrValue.toString("utf-8") : stderrValue ?? "";
+    const noCrontab = status === 1 && (!stderr.trim() || /no crontab/i.test(stderr));
+    if (noCrontab)
+      return "";
+    throw error45;
+  }
+}
+function writeUserCrontab(content) {
+  const normalized = content.trim();
+  const input = normalized ? `${normalized}
+` : "";
+  execFileSync("crontab", ["-"], { input });
+}
+function stripManagedCronBlocks(content, blockIds) {
+  const lines = content ? content.split(/\r?\n/) : [];
+  const retained = [];
+  const prefix = `# BEGIN ${CRON_MANAGED_PREFIX} `;
+  const endPrefix = `# END ${CRON_MANAGED_PREFIX} `;
+  let removed = 0;
+  for (let index = 0;index < lines.length; ) {
+    const line = lines[index];
+    if (!line.startsWith(prefix)) {
+      retained.push(line);
+      index += 1;
+      continue;
+    }
+    const id = line.slice(prefix.length).trim();
+    let endIndex = lines.length - 1;
+    for (let probe = index + 1;probe < lines.length; probe += 1) {
+      if (lines[probe] === `${endPrefix}${id}`) {
+        endIndex = probe;
+        break;
+      }
+    }
+    if (blockIds.has(id)) {
+      removed += 1;
+    } else {
+      for (let keep = index;keep <= endIndex; keep += 1) {
+        retained.push(lines[keep]);
+      }
+    }
+    index = endIndex + 1;
+  }
+  return {
+    content: retained.join(`
+`).replace(/\n{3,}/g, `
+
+`).trimEnd(),
+    removed
+  };
+}
+function createCronEntry(job) {
+  const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir());
+  const jobPath = jobFilePath(scopeId, job.slug);
+  const logFilePath = scopedLogPath(scopeId, job.slug);
+  const escapedSupervisor = shellEscapeDoubleQuoted(SUPERVISOR_PATH);
+  const escapedJobPath = shellEscapeDoubleQuoted(jobPath);
+  const escapedLogPath = shellEscapeDoubleQuoted(logFilePath);
+  const escapedPath = shellEscapeDoubleQuoted(getEnhancedPath());
+  return `${job.schedule} PATH="${escapedPath}" /usr/bin/perl "${escapedSupervisor}" "${escapedJobPath}" >> "${escapedLogPath}" 2>&1`;
+}
+function installCronJob(job) {
+  if (!isCronAvailable()) {
+    throw new Error("cron backend is unavailable: `crontab` command not found.");
+  }
+  ensureDir(LOGS_DIR);
+  const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir());
+  ensureDir(scopeLogsDir(scopeId));
+  ensureSupervisorScript();
+  const blockId = cronBlockId(job);
+  const current = readUserCrontab();
+  const stripped = stripManagedCronBlocks(current, new Set([blockId, cronLegacyBlockId(job)]));
+  const block = [cronBlockStart(blockId), createCronEntry(job), cronBlockEnd(blockId)].join(`
+`);
+  const next = [stripped.content.trim(), block].filter(Boolean).join(`
+
+`);
+  writeUserCrontab(next);
+}
+function uninstallCronJob(job) {
+  if (!isCronAvailable())
+    return;
+  const current = readUserCrontab();
+  const stripped = stripManagedCronBlocks(current, new Set([cronBlockId(job), cronLegacyBlockId(job)]));
+  if (stripped.removed === 0)
+    return;
+  writeUserCrontab(stripped.content);
+}
+function resolveSchedulerBackend() {
+  if (IS_MAC)
+    return "launchd";
+  if (IS_WINDOWS)
+    return "schtasks";
+  if (isSystemdUserAvailable())
+    return "systemd";
+  if (isCronAvailable())
+    return "cron";
+  if (IS_LINUX) {
+    throw new Error("No supported scheduler backend found: systemd --user is unavailable and `crontab` is not installed.");
+  }
+  throw new Error(`Unsupported platform: ${platform()}. Supported platforms: macOS (launchd), Linux (systemd or cron), Windows, and POSIX systems with cron.`);
+}
 function installJob(job) {
-  if (IS_MAC) {
+  const backend = resolveSchedulerBackend();
+  if (backend === "launchd") {
     installLaunchdJob(job);
-  } else if (IS_LINUX) {
-    installSystemdJob(job);
-  } else if (IS_WINDOWS) {
+  } else if (backend === "systemd") {
+    try {
+      installSystemdJob(job);
+    } catch (error45) {
+      if (!isCronAvailable()) {
+        throw error45;
+      }
+      installCronJob(job);
+      return "cron";
+    }
+  } else if (backend === "schtasks") {
     installWindowsJob(job);
   } else {
-    throw new Error(`Unsupported platform: ${platform()}. Supported platforms: macOS, Linux, and Windows.`);
+    installCronJob(job);
   }
+  return backend;
 }
 function uninstallJob(job) {
   if (IS_MAC) {
     uninstallLaunchdJob(job);
-  } else if (IS_LINUX) {
-    uninstallSystemdJob(job);
-  } else if (IS_WINDOWS) {
-    uninstallWindowsJob(job);
+    return;
   }
+  if (IS_WINDOWS) {
+    uninstallWindowsJob(job);
+    return;
+  }
+  if (IS_LINUX) {
+    uninstallSystemdJob(job);
+    uninstallCronJob(job);
+    return;
+  }
+  uninstallCronJob(job);
 }
 function ensureScopeStorage(scopeId) {
   ensureDir(SCHEDULER_DIR);
@@ -14187,7 +14360,7 @@ var SchedulerPlugin = async () => {
   return {
     tool: {
       schedule_job: tool({
-        description: "Schedule a recurring job to run an opencode prompt. Uses launchd (Mac), systemd (Linux), or Windows Task Scheduler.",
+        description: "Schedule a recurring job to run an opencode prompt. Uses launchd (Mac), systemd (Linux), Windows Task Scheduler, or cron fallback when needed.",
         args: {
           name: tool.schema.string().describe("A short name for the job (e.g. 'standing desk search')"),
           schedule: tool.schema.string().describe("Cron expression: '0 9 * * *' (daily 9am), '0 */6 * * *' (every 6h), '30 8 * * 1' (Monday 8:30am)"),
@@ -14292,9 +14465,9 @@ var SchedulerPlugin = async () => {
           }
           try {
             saveJob(job);
-            installJob(job);
-            const platformName = IS_MAC ? "launchd" : IS_LINUX ? "systemd" : IS_WINDOWS ? "schtasks" : "unknown";
-            const reliabilityLine = IS_WINDOWS ? "Windows note: scheduled runs use Task Scheduler directly. For advanced reliability guarantees, prefer simple cron schedules or split complex jobs." : "The job will run at the scheduled time. If your computer was asleep, it will catch up when it wakes.";
+            const backend = installJob(job);
+            const platformName = backend;
+            const reliabilityLine = backend === "schtasks" ? "Windows note: scheduled runs use Task Scheduler directly. For advanced reliability guarantees, prefer simple cron schedules or split complex jobs." : backend === "cron" ? "Cron note: missed runs during sleep are not replayed. For catch-up behavior, use launchd or systemd when available." : "The job will run at the scheduled time. If your computer was asleep, it will catch up when it wakes.";
             const primaryLine = run.command ? `Command: ${run.command}${run.arguments ? ` ${run.arguments}` : ""}` : `Prompt: ${(run.prompt ?? "").slice(0, 100)}${(run.prompt ?? "").length > 100 ? "..." : ""}`;
             const attachLine = run.attachUrl ? `Attach URL: ${run.attachUrl}
 ` : "";
