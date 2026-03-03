@@ -1,12 +1,16 @@
 // @bun
 var __defProp = Object.defineProperty;
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, {
       get: all[name],
       enumerable: true,
       configurable: true,
-      set: (newValue) => all[name] = () => newValue
+      set: __exportSetter.bind(all, name)
     });
 };
 
@@ -12983,7 +12987,7 @@ function cronToSystemdCalendars(cron) {
         for (const domValue of domValues) {
           for (const monthValue of months) {
             for (const dowValue of dowValues) {
-              calendars.push(`${dowValue} *-${monthValue}-${domValue} ${hourValue}:${minuteValue}:00`);
+              calendars.push(dowValue === "*" ? `*-${monthValue}-${domValue} ${hourValue}:${minuteValue}:00` : `${dowValue} *-${monthValue}-${domValue} ${hourValue}:${minuteValue}:00`);
             }
           }
         }
