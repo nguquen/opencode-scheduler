@@ -14641,11 +14641,13 @@ ${content.trim()}
         description: "Get details for a scheduled job",
         args: {
           name: tool.schema.string().describe("The job name or slug"),
+          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
         },
         async execute(args) {
           const format = normalizeFormat(args.format);
-          const job = findJobByName(args.name);
+          const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+          const job = findJobByName(args.name, { scopeId });
           if (!job) {
             return errorResult(format, `Job "${args.name}" not found.`);
           }
@@ -14656,6 +14658,7 @@ ${content.trim()}
         description: "Update a scheduled job",
         args: {
           name: tool.schema.string().describe("The job name or slug"),
+          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
           schedule: tool.schema.string().optional().describe("Updated cron expression"),
           prompt: tool.schema.string().optional().describe("Updated prompt (legacy; prefer command/arguments/etc)"),
           command: tool.schema.string().optional().describe("Updated opencode command (maps to --command)"),
@@ -14677,7 +14680,8 @@ ${content.trim()}
         },
         async execute(args) {
           const format = normalizeFormat(args.format);
-          const job = findJobByName(args.name);
+          const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+          const job = findJobByName(args.name, { scopeId });
           if (!job) {
             return errorResult(format, `Job "${args.name}" not found.`);
           }
@@ -14803,11 +14807,13 @@ ${content.trim()}
         description: "Delete a scheduled job",
         args: {
           name: tool.schema.string().describe("The job name or slug to delete"),
+          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
         },
         async execute(args) {
           const format = normalizeFormat(args.format);
-          const job = findJobByName(args.name);
+          const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+          const job = findJobByName(args.name, { scopeId });
           if (!job) {
             return errorResult(format, `Job "${args.name}" not found.`);
           }
@@ -14850,6 +14856,7 @@ ${content.trim()}
         description: "Run a scheduled job immediately",
         args: {
           name: tool.schema.string().describe("The job name or slug"),
+          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
           prompt: tool.schema.string().optional().describe("Override prompt for this run"),
           command: tool.schema.string().optional().describe("Override command for this run"),
           arguments: tool.schema.string().optional().describe("Override arguments for command mode"),
@@ -14868,7 +14875,8 @@ ${content.trim()}
         },
         async execute(args) {
           const format = normalizeFormat(args.format);
-          const job = findJobByName(args.name);
+          const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+          const job = findJobByName(args.name, { scopeId });
           if (!job) {
             return errorResult(format, `Job "${args.name}" not found. Use list_jobs to see available jobs.`);
           }
@@ -14943,12 +14951,14 @@ Logs: ${runResult.logPath}${attachHint}${logSection}`, {
         description: "View the latest logs from a scheduled job",
         args: {
           name: tool.schema.string().describe("The job name or slug"),
+          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
           lines: tool.schema.number().optional().describe("Number of lines from the end of the log (default 200)."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
         },
         async execute(args) {
           const format = normalizeFormat(args.format);
-          const job = findJobByName(args.name);
+          const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+          const job = findJobByName(args.name, { scopeId });
           if (!job) {
             return errorResult(format, `Job "${args.name}" not found.`);
           }
