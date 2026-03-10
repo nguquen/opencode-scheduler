@@ -2552,9 +2552,9 @@ export const SchedulerPlugin: Plugin = async () => {
            schedule: tool.schema
              .string()
              .describe("Cron expression: '0 9 * * *' (daily 9am), '0 */6 * * *' (every 6h), '30 8 * * 1' (Monday 8:30am)"),
-           prompt: tool.schema.string().optional().describe("Prompt to run (legacy; prefer run fields)"),
-           command: tool.schema.string().optional().describe("Optional: opencode command to run (maps to --command)"),
-           arguments: tool.schema.string().optional().describe("Optional: arguments string for command mode"),
+            prompt: tool.schema.string().optional().describe("The prompt message to send to the agent (e.g. 'Search for standing desk deals and notify me')."),
+            command: tool.schema.string().optional().describe("Optional: an opencode slash command to run instead of a prompt (e.g. 'test', 'build'). This is NOT a shell command — it maps to opencode's --command flag."),
+            arguments: tool.schema.string().optional().describe("Optional: arguments to pass to the opencode slash command (used with 'command' field)."),
            files: tool.schema
              .string()
              .optional()
@@ -2942,10 +2942,10 @@ Commands:
           schedule: tool.schema.string().optional().describe("Updated cron expression"),
 
           // Legacy prompt field
-          prompt: tool.schema.string().optional().describe("Updated prompt (legacy; prefer command/arguments/etc)"),
+          prompt: tool.schema.string().optional().describe("Updated prompt message to send to the agent."),
 
-          command: tool.schema.string().optional().describe("Updated opencode command (maps to --command)"),
-          arguments: tool.schema.string().optional().describe("Updated command arguments string"),
+          command: tool.schema.string().optional().describe("Updated opencode slash command (e.g. 'test', 'build'). This is NOT a shell command."),
+          arguments: tool.schema.string().optional().describe("Updated arguments for the opencode slash command."),
           files: tool.schema
             .string()
             .optional()
@@ -3195,9 +3195,9 @@ Commands:
             .string()
             .describe("The project root directory for scoping. Always provide this to ensure correct project scoping — the server default may not match the active project."),
           // Optional overrides for a one-off run
-          prompt: tool.schema.string().optional().describe("Override prompt for this run"),
-          command: tool.schema.string().optional().describe("Override command for this run"),
-          arguments: tool.schema.string().optional().describe("Override arguments for command mode"),
+          prompt: tool.schema.string().optional().describe("Override prompt message for this run."),
+          command: tool.schema.string().optional().describe("Override opencode slash command for this run. This is NOT a shell command."),
+          arguments: tool.schema.string().optional().describe("Override arguments for the opencode slash command."),
           files: tool.schema.string().optional().describe("Override comma-separated files/dirs to attach"),
           agent: tool.schema.string().optional().describe("Override agent"),
           model: tool.schema.string().optional().describe("Override model"),
