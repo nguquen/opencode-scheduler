@@ -14382,7 +14382,7 @@ var SchedulerPlugin = async () => {
           runFormat: tool.schema.string().optional().describe("Optional: run output format (maps to opencode --format: default|json)"),
           port: tool.schema.number().optional().describe("Optional: server port for local server (maps to --port)"),
           source: tool.schema.string().optional().describe("Optional: source app (e.g. 'marketplace') - used for filtering"),
-          workdir: tool.schema.string().optional().describe("Optional: working directory to run from (for MCP config). Defaults to current directory."),
+          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
           attachUrl: tool.schema.string().optional().describe("Optional: attach URL for opencode run (e.g. http://localhost:4096)."),
           timeoutSeconds: tool.schema.number().optional().describe("Optional: max runtime in seconds (0 disables)."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
@@ -14390,7 +14390,7 @@ var SchedulerPlugin = async () => {
         async execute(args) {
           const format = normalizeFormat(args.format);
           const slug = args.source ? `${args.source}-${slugify(args.name)}` : slugify(args.name);
-          const workdir = normalizeWorkdirPath(args.workdir || process.cwd());
+          const workdir = normalizeWorkdirPath(args.scopeRoot || process.cwd());
           const scopeId = deriveScopeId(workdir);
           if (loadScopedJob(scopeId, slug)) {
             return errorResult(format, `Job "${slug}" already exists in this workspace scope (${scopeId}). Delete it first or use a different name.`);
@@ -14501,7 +14501,7 @@ Commands:
           source: tool.schema.string().optional().describe("Filter by source app (e.g. 'marketplace')"),
           allScopes: tool.schema.boolean().optional().describe("List jobs across all scopes."),
           includeLegacy: tool.schema.boolean().optional().describe("Include legacy jobs from ~/.config/opencode/jobs"),
-          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
+          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
         },
         async execute(args) {
@@ -14601,7 +14601,7 @@ ${content.trim()}
         description: "Install a built-in skill into your repo's .opencode/skill directory.",
         args: {
           name: tool.schema.string().optional().describe("Skill name (default: scheduled-job-best-practices)"),
-          directory: tool.schema.string().optional().describe("Repo root directory to install into (defaults to current directory)."),
+          directory: tool.schema.string().optional().describe("Repo root directory to install into. Always provide this to ensure correct targeting \u2014 the server default may not match the active project."),
           overwrite: tool.schema.boolean().optional().describe("Overwrite existing files (default false)."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
         },
@@ -14641,7 +14641,7 @@ ${content.trim()}
         description: "Get details for a scheduled job",
         args: {
           name: tool.schema.string().describe("The job name or slug"),
-          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
+          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
         },
         async execute(args) {
@@ -14658,7 +14658,7 @@ ${content.trim()}
         description: "Update a scheduled job",
         args: {
           name: tool.schema.string().describe("The job name or slug"),
-          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
+          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
           schedule: tool.schema.string().optional().describe("Updated cron expression"),
           prompt: tool.schema.string().optional().describe("Updated prompt (legacy; prefer command/arguments/etc)"),
           command: tool.schema.string().optional().describe("Updated opencode command (maps to --command)"),
@@ -14807,7 +14807,7 @@ ${content.trim()}
         description: "Delete a scheduled job",
         args: {
           name: tool.schema.string().describe("The job name or slug to delete"),
-          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
+          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
         },
         async execute(args) {
@@ -14856,7 +14856,7 @@ ${content.trim()}
         description: "Run a scheduled job immediately",
         args: {
           name: tool.schema.string().describe("The job name or slug"),
-          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
+          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
           prompt: tool.schema.string().optional().describe("Override prompt for this run"),
           command: tool.schema.string().optional().describe("Override command for this run"),
           arguments: tool.schema.string().optional().describe("Override arguments for command mode"),
@@ -14951,7 +14951,7 @@ Logs: ${runResult.logPath}${attachHint}${logSection}`, {
         description: "View the latest logs from a scheduled job",
         args: {
           name: tool.schema.string().describe("The job name or slug"),
-          scopeRoot: tool.schema.string().optional().describe("Optional: scope root directory (defaults to current directory)."),
+          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
           lines: tool.schema.number().optional().describe("Number of lines from the end of the log (default 200)."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
         },
