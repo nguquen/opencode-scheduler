@@ -13784,13 +13784,13 @@ function normalizeRunSpec(run) {
     const trimmed = normalized.prompt.trim();
     normalized.prompt = trimmed ? trimmed : undefined;
   }
-  if (typeof normalized.command === "string") {
-    const trimmed = normalized.command.trim();
-    normalized.command = trimmed ? trimmed : undefined;
+  if (typeof normalized.slashCommand === "string") {
+    const trimmed = normalized.slashCommand.trim();
+    normalized.slashCommand = trimmed ? trimmed : undefined;
   }
-  if (typeof normalized.arguments === "string") {
-    const trimmed = normalized.arguments.trim();
-    normalized.arguments = trimmed ? trimmed : undefined;
+  if (typeof normalized.slashCommandArgs === "string") {
+    const trimmed = normalized.slashCommandArgs.trim();
+    normalized.slashCommandArgs = trimmed ? trimmed : undefined;
   }
   if (Array.isArray(normalized.files)) {
     const files = normalized.files.map((file2) => String(file2).trim()).filter(Boolean);
@@ -13840,15 +13840,15 @@ function normalizeRunSpec(run) {
 }
 function validateRunSpec(run) {
   const hasPrompt = typeof run.prompt === "string" && run.prompt.trim().length > 0;
-  const hasCommand = typeof run.command === "string" && run.command.trim().length > 0;
+  const hasCommand = typeof run.slashCommand === "string" && run.slashCommand.trim().length > 0;
   if (!hasPrompt && !hasCommand) {
-    throw new Error("Job must have either run.prompt or run.command");
+    throw new Error("Job must have either run.prompt or run.slashCommand");
   }
   if (hasPrompt && hasCommand) {
-    throw new Error("Job cannot specify both run.prompt and run.command");
+    throw new Error("Job cannot specify both run.prompt and run.slashCommand");
   }
-  if (hasCommand && run.arguments !== undefined && typeof run.arguments !== "string") {
-    throw new Error("run.arguments must be a string");
+  if (hasCommand && run.slashCommandArgs !== undefined && typeof run.slashCommandArgs !== "string") {
+    throw new Error("run.slashCommandArgs must be a string");
   }
   if (run.attachUrl !== undefined) {
     normalizeAttachUrl(run.attachUrl);
@@ -13943,10 +13943,14 @@ function normalizeJobRun(raw) {
   const run = {};
   if (typeof raw.prompt === "string")
     run.prompt = raw.prompt;
-  if (typeof raw.command === "string")
-    run.command = raw.command;
-  if (typeof raw.arguments === "string")
-    run.arguments = raw.arguments;
+  if (typeof raw.slashCommand === "string")
+    run.slashCommand = raw.slashCommand;
+  else if (typeof raw.command === "string")
+    run.slashCommand = raw.command;
+  if (typeof raw.slashCommandArgs === "string")
+    run.slashCommandArgs = raw.slashCommandArgs;
+  else if (typeof raw.arguments === "string")
+    run.slashCommandArgs = raw.arguments;
   if (Array.isArray(raw.files)) {
     run.files = raw.files.map((file2) => String(file2));
   }
@@ -14056,8 +14060,8 @@ function buildOpencodeArgs(job) {
   if (run.port !== undefined) {
     args.push("--port", String(run.port));
   }
-  if (run.command) {
-    args.push("--command", run.command);
+  if (run.slashCommand) {
+    args.push("--command", run.slashCommand);
   }
   if (run.agent) {
     args.push("--agent", run.agent);
@@ -14086,8 +14090,8 @@ function buildOpencodeArgs(job) {
   for (const file2 of run.files ?? []) {
     args.push("--file", file2);
   }
-  if (run.command) {
-    args.push("--", run.arguments ?? "");
+  if (run.slashCommand) {
+    args.push("--", run.slashCommandArgs ?? "");
   } else {
     args.push(run.prompt ?? "");
   }
@@ -14273,10 +14277,10 @@ function formatJobDetails(job) {
   } else if (job.attachUrl) {
     lines.push(`Attach URL: ${job.attachUrl}`);
   }
-  if (run?.command) {
-    lines.push(`Command: ${run.command}`);
-    if (run.arguments)
-      lines.push(`Arguments: ${run.arguments}`);
+  if (run?.slashCommand) {
+    lines.push(`Slash command: ${run.slashCommand}`);
+    if (run.slashCommandArgs)
+      lines.push(`Slash command args: ${run.slashCommandArgs}`);
   }
   if (run?.prompt) {
     lines.push(`Prompt: ${run.prompt}`);
@@ -14372,8 +14376,8 @@ var SchedulerPlugin = async () => {
           name: tool.schema.string().describe("A short name for the job (e.g. 'standing desk search')"),
           schedule: tool.schema.string().describe("Cron expression: '0 9 * * *' (daily 9am), '0 */6 * * *' (every 6h), '30 8 * * 1' (Monday 8:30am)"),
           prompt: tool.schema.string().optional().describe("The prompt message to send to the agent (e.g. 'Search for standing desk deals and notify me')."),
-          command: tool.schema.string().optional().describe("Optional: an opencode slash command to run instead of a prompt (e.g. 'test', 'build'). This is NOT a shell command \u2014 it maps to opencode's --command flag."),
-          arguments: tool.schema.string().optional().describe("Optional: arguments to pass to the opencode slash command (used with 'command' field)."),
+          slashCommand: tool.schema.string().optional().describe("Optional: an opencode slash command to run instead of a prompt (e.g. 'test', 'build'). This is NOT a shell command."),
+          slashCommandArgs: tool.schema.string().optional().describe("Optional: arguments to pass to the slash command specified in slashCommand."),
           files: tool.schema.string().optional().describe("Optional: comma-separated list of files/dirs to attach (maps to repeated --file)"),
           agent: tool.schema.string().optional().describe("Optional: agent to use (maps to --agent)"),
           model: tool.schema.string().optional().describe("Optional: model to use (maps to --model)"),
@@ -14418,8 +14422,8 @@ var SchedulerPlugin = async () => {
           }
           const run = {
             prompt: args.prompt,
-            command: args.command,
-            arguments: args.arguments,
+            slashCommand: args.slashCommand,
+            slashCommandArgs: args.slashCommandArgs,
             files: parseFiles(args.files),
             agent: args.agent,
             model: args.model,
@@ -14475,7 +14479,7 @@ var SchedulerPlugin = async () => {
             const backend = installJob(job);
             const platformName = backend;
             const reliabilityLine = backend === "schtasks" ? "Windows note: scheduled runs use Task Scheduler directly. For advanced reliability guarantees, prefer simple cron schedules or split complex jobs." : backend === "cron" ? "Cron note: missed runs during sleep are not replayed. For catch-up behavior, use launchd or systemd when available." : "The job will run at the scheduled time. If your computer was asleep, it will catch up when it wakes.";
-            const primaryLine = run.command ? `Command: ${run.command}${run.arguments ? ` ${run.arguments}` : ""}` : `Prompt: ${(run.prompt ?? "").slice(0, 100)}${(run.prompt ?? "").length > 100 ? "..." : ""}`;
+            const primaryLine = run.slashCommand ? `Slash command: ${run.slashCommand}${run.slashCommandArgs ? ` ${run.slashCommandArgs}` : ""}` : `Prompt: ${(run.prompt ?? "").slice(0, 100)}${(run.prompt ?? "").length > 100 ? "..." : ""}`;
             const attachLine = run.attachUrl ? `Attach URL: ${run.attachUrl}
 ` : "";
             return okResult(format, `Scheduled "${args.name}"
@@ -14531,7 +14535,7 @@ Try: "Schedule a daily job at 9am to search for standing desks"`;
                 return;
               }
             })();
-            const preview = run?.command ? `${run.command}${run.arguments ? ` ${run.arguments}` : ""}` : run?.prompt ?? j.prompt ?? "(missing prompt)";
+            const preview = run?.slashCommand ? `${run.slashCommand}${run.slashCommandArgs ? ` ${run.slashCommandArgs}` : ""}` : run?.prompt ?? j.prompt ?? "(missing prompt)";
             const trimmed = preview.trim();
             const snippet = trimmed.slice(0, 50) + (trimmed.length > 50 ? "..." : "");
             return `${i + 1}. ${j.name} (${j.slug})
@@ -14664,8 +14668,8 @@ ${content.trim()}
           scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
           schedule: tool.schema.string().optional().describe("Updated cron expression"),
           prompt: tool.schema.string().optional().describe("Updated prompt message to send to the agent."),
-          command: tool.schema.string().optional().describe("Updated opencode slash command (e.g. 'test', 'build'). This is NOT a shell command."),
-          arguments: tool.schema.string().optional().describe("Updated arguments for the opencode slash command."),
+          slashCommand: tool.schema.string().optional().describe("Updated opencode slash command (e.g. 'test', 'build'). This is NOT a shell command."),
+          slashCommandArgs: tool.schema.string().optional().describe("Updated arguments for the slash command."),
           files: tool.schema.string().optional().describe("Updated comma-separated list of files/dirs to attach"),
           agent: tool.schema.string().optional().describe("Updated agent (maps to --agent)"),
           model: tool.schema.string().optional().describe("Updated model (maps to --model)"),
@@ -14707,8 +14711,8 @@ ${content.trim()}
           const nextRunCandidate = {
             ...currentRun,
             prompt: args.prompt !== undefined ? args.prompt : currentRun.prompt,
-            command: args.command !== undefined ? args.command : currentRun.command,
-            arguments: args.arguments !== undefined ? args.arguments : currentRun.arguments,
+            slashCommand: args.slashCommand !== undefined ? args.slashCommand : currentRun.slashCommand,
+            slashCommandArgs: args.slashCommandArgs !== undefined ? args.slashCommandArgs : currentRun.slashCommandArgs,
             files: args.files !== undefined ? parseFiles(args.files) : currentRun.files,
             agent: args.agent !== undefined ? args.agent : currentRun.agent,
             model: args.model !== undefined ? args.model : currentRun.model,
@@ -14861,8 +14865,8 @@ ${content.trim()}
           name: tool.schema.string().describe("The job name or slug"),
           scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
           prompt: tool.schema.string().optional().describe("Override prompt message for this run."),
-          command: tool.schema.string().optional().describe("Override opencode slash command for this run. This is NOT a shell command."),
-          arguments: tool.schema.string().optional().describe("Override arguments for the opencode slash command."),
+          slashCommand: tool.schema.string().optional().describe("Override opencode slash command for this run. This is NOT a shell command."),
+          slashCommandArgs: tool.schema.string().optional().describe("Override arguments for the slash command."),
           files: tool.schema.string().optional().describe("Override comma-separated files/dirs to attach"),
           agent: tool.schema.string().optional().describe("Override agent"),
           model: tool.schema.string().optional().describe("Override model"),
@@ -14901,8 +14905,8 @@ ${content.trim()}
           const overrideCandidate = {
             ...baseRun,
             prompt: args.prompt !== undefined ? args.prompt : baseRun.prompt,
-            command: args.command !== undefined ? args.command : baseRun.command,
-            arguments: args.arguments !== undefined ? args.arguments : baseRun.arguments,
+            slashCommand: args.slashCommand !== undefined ? args.slashCommand : baseRun.slashCommand,
+            slashCommandArgs: args.slashCommandArgs !== undefined ? args.slashCommandArgs : baseRun.slashCommandArgs,
             files: args.files !== undefined ? parseFiles(args.files) : baseRun.files,
             agent: args.agent !== undefined ? args.agent : baseRun.agent,
             model: args.model !== undefined ? args.model : baseRun.model,
