@@ -2226,8 +2226,11 @@ function buildOpencodeArgs(job: Job): { command: string; args: string[] } {
     args.push("--file", file)
   }
 
-  args.push("--")
-  args.push(run.command ? run.arguments ?? "" : run.prompt ?? "")
+  if (run.command) {
+    args.push("--", run.arguments ?? "")
+  } else {
+    args.push(run.prompt ?? "")
+  }
 
   return { command, args }
 }

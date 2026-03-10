@@ -14086,8 +14086,11 @@ function buildOpencodeArgs(job) {
   for (const file2 of run.files ?? []) {
     args.push("--file", file2);
   }
-  args.push("--");
-  args.push(run.command ? run.arguments ?? "" : run.prompt ?? "");
+  if (run.command) {
+    args.push("--", run.arguments ?? "");
+  } else {
+    args.push(run.prompt ?? "");
+  }
   return { command, args };
 }
 function buildRunEnvironment() {
