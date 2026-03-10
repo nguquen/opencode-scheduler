@@ -2569,10 +2569,9 @@ export const SchedulerPlugin: Plugin = async () => {
              .describe("Optional: run output format (maps to opencode --format: default|json)"),
            port: tool.schema.number().optional().describe("Optional: server port for local server (maps to --port)"),
            source: tool.schema.string().optional().describe("Optional: source app (e.g. 'marketplace') - used for filtering"),
-           workdir: tool.schema
-             .string()
-             .optional()
-             .describe("Optional: working directory to run from (for MCP config). Defaults to current directory."),
+            scopeRoot: tool.schema
+              .string()
+              .describe("The project root directory for scoping. Always provide this to ensure correct project scoping — the server default may not match the active project."),
             attachUrl: tool.schema
               .string()
               .optional()
@@ -2588,7 +2587,7 @@ export const SchedulerPlugin: Plugin = async () => {
             const format = normalizeFormat(args.format)
             const slug = args.source ? `${args.source}-${slugify(args.name)}` : slugify(args.name)
 
-            const workdir = normalizeWorkdirPath(args.workdir || process.cwd())
+            const workdir = normalizeWorkdirPath(args.scopeRoot || process.cwd())
             const scopeId = deriveScopeId(workdir)
 
             if (loadScopedJob(scopeId, slug)) {
@@ -2737,8 +2736,7 @@ Commands:
           includeLegacy: tool.schema.boolean().optional().describe("Include legacy jobs from ~/.config/opencode/jobs"),
           scopeRoot: tool.schema
             .string()
-            .optional()
-            .describe("Optional: scope root directory (defaults to current directory)."),
+            .describe("The project root directory for scoping. Always provide this to ensure correct project scoping — the server default may not match the active project."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json')."),
         },
 
@@ -2866,7 +2864,7 @@ Commands:
           directory: tool.schema
             .string()
             .optional()
-            .describe("Repo root directory to install into (defaults to current directory)."),
+            .describe("Repo root directory to install into. Always provide this to ensure correct targeting — the server default may not match the active project."),
           overwrite: tool.schema.boolean().optional().describe("Overwrite existing files (default false)."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json')."),
         },
@@ -2915,8 +2913,7 @@ Commands:
           name: tool.schema.string().describe("The job name or slug"),
           scopeRoot: tool.schema
             .string()
-            .optional()
-            .describe("Optional: scope root directory (defaults to current directory)."),
+            .describe("The project root directory for scoping. Always provide this to ensure correct project scoping — the server default may not match the active project."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json')."),
         },
         async execute(args) {
@@ -2938,8 +2935,7 @@ Commands:
           name: tool.schema.string().describe("The job name or slug"),
           scopeRoot: tool.schema
             .string()
-            .optional()
-            .describe("Optional: scope root directory (defaults to current directory)."),
+            .describe("The project root directory for scoping. Always provide this to ensure correct project scoping — the server default may not match the active project."),
           schedule: tool.schema.string().optional().describe("Updated cron expression"),
 
           // Legacy prompt field
@@ -3127,8 +3123,7 @@ Commands:
           name: tool.schema.string().describe("The job name or slug to delete"),
           scopeRoot: tool.schema
             .string()
-            .optional()
-            .describe("Optional: scope root directory (defaults to current directory)."),
+            .describe("The project root directory for scoping. Always provide this to ensure correct project scoping — the server default may not match the active project."),
           format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json')."),
         },
         async execute(args) {
@@ -3195,8 +3190,7 @@ Commands:
           name: tool.schema.string().describe("The job name or slug"),
           scopeRoot: tool.schema
             .string()
-            .optional()
-            .describe("Optional: scope root directory (defaults to current directory)."),
+            .describe("The project root directory for scoping. Always provide this to ensure correct project scoping — the server default may not match the active project."),
           // Optional overrides for a one-off run
           prompt: tool.schema.string().optional().describe("Override prompt for this run"),
           command: tool.schema.string().optional().describe("Override command for this run"),
@@ -3304,8 +3298,7 @@ Commands:
           name: tool.schema.string().describe("The job name or slug"),
           scopeRoot: tool.schema
             .string()
-            .optional()
-            .describe("Optional: scope root directory (defaults to current directory)."),
+            .describe("The project root directory for scoping. Always provide this to ensure correct project scoping — the server default may not match the active project."),
           lines: tool.schema
             .number()
             .optional()
