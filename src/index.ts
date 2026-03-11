@@ -2232,7 +2232,12 @@ function buildOpencodeArgs(job: Job): { command: string; args: string[] } {
   if (run.slashCommand) {
     args.push("--", run.slashCommandArgs ?? "")
   } else {
-    args.push(run.prompt ?? "")
+    // Split prompt into individual words so opencode's message parser
+    // doesn't quote-wrap a single multi-word argument.  opencode joins
+    // positional args with spaces: any arg containing a space gets
+    // wrapped in literal quotes which the agent then sees in the prompt.
+    const words = (run.prompt ?? "").split(/\s+/).filter(Boolean)
+    args.push(...words)
   }
 
   return { command, args }

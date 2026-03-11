@@ -1,12 +1,16 @@
 // @bun
 var __defProp = Object.defineProperty;
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, {
       get: all[name],
       enumerable: true,
       configurable: true,
-      set: (newValue) => all[name] = () => newValue
+      set: __exportSetter.bind(all, name)
     });
 };
 
@@ -14089,7 +14093,8 @@ function buildOpencodeArgs(job) {
   if (run.slashCommand) {
     args.push("--", run.slashCommandArgs ?? "");
   } else {
-    args.push(run.prompt ?? "");
+    const words = (run.prompt ?? "").split(/\s+/).filter(Boolean);
+    args.push(...words);
   }
   return { command, args };
 }
