@@ -14090,12 +14090,9 @@ function buildOpencodeArgs(job) {
   for (const file2 of run.files ?? []) {
     args.push("--file", file2);
   }
-  if (run.slashCommand) {
-    args.push("--", run.slashCommandArgs ?? "");
-  } else {
-    const words = (run.prompt ?? "").split(/\s+/).filter(Boolean);
-    args.push(...words);
-  }
+  const message = run.slashCommand ? run.slashCommandArgs ?? "" : run.prompt ?? "";
+  const words = message.split(/\s+/).filter(Boolean);
+  args.push("--", ...words);
   return { command, args };
 }
 function buildRunEnvironment() {
