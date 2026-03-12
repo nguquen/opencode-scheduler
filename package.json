@@ -1,6 +1,6 @@
 {
   "name": "@nguquen/opencode-scheduler",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "OpenCode plugin for scheduling recurring jobs using launchd, systemd, Task Scheduler, or cron fallback",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
