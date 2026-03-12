@@ -14054,6 +14054,9 @@ function buildOpencodeArgs(job) {
   const run = normalizeRunSpec(getJobRun(job));
   validateRunSpec(run);
   const args = ["run"];
+  if (job.workdir) {
+    args.push("--dir", job.workdir);
+  }
   if (run.attachUrl) {
     args.push("--attach", run.attachUrl);
   }
