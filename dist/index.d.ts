@@ -12,5 +12,12 @@
  * - Environment variable injection (PATH for node/npx)
  */
 import type { Plugin } from "@opencode-ai/plugin";
-export declare const SchedulerPlugin: Plugin;
-export default SchedulerPlugin;
+import type { Plugin as PluginV2 } from "@opencode/plugin";
+type PluginV2Context = PluginV2.Context;
+declare function setupV2(ctx: PluginV2Context): Promise<void>;
+declare const _default: {
+    id: string;
+    server: Plugin;
+    setup: typeof setupV2;
+};
+export default _default;

@@ -1,7 +1,7 @@
 {
   "name": "@nguquen/opencode-scheduler",
   "version": "1.4.1",
-  "description": "OpenCode plugin for scheduling recurring jobs using launchd, systemd, Task Scheduler, or cron fallback",
+  "description": "OpenCode plugin (OpenCode 1 and 2) for scheduling recurring jobs using launchd, systemd, Task Scheduler, or cron fallback",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -49,10 +49,20 @@
     "@opencode-ai/plugin": "^1.0.162"
   },
   "devDependencies": {
+    "@opencode/plugin": "^2.0.21",
     "bun-types": "latest",
     "typescript": "^5.7.3"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.0.0"
+    "@opencode-ai/plugin": ">=1.0.0",
+    "@opencode/plugin": ">=2.0.18 <3"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    },
+    "@opencode/plugin": {
+      "optional": true
+    }
   }
 }

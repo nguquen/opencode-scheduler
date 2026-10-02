@@ -10745,7 +10745,7 @@ class JSONSchemaGenerator {
               if (val === undefined) {
                 if (this.unrepresentable === "throw") {
                   throw new Error("Literal `undefined` cannot be represented in JSON Schema");
-                } else {}
+                }
               } else if (typeof val === "bigint") {
                 if (this.unrepresentable === "throw") {
                   throw new Error("BigInt literals cannot be represented in JSON Schema");
@@ -12347,6 +12347,7 @@ var SCHEDULER_DIR = join(OPENCODE_CONFIG, "scheduler");
 var SCOPES_DIR = join(SCHEDULER_DIR, "scopes");
 var SUPERVISOR_PATH = join(SCHEDULER_DIR, "supervisor.pl");
 var SCHEDULER_CONFIG = join(OPENCODE_CONFIG, "opencode-scheduler.json");
+var HOST_GENERATION = 1;
 var IS_MAC = platform() === "darwin";
 var IS_LINUX = platform() === "linux";
 var IS_WINDOWS = platform() === "win32";
@@ -12590,6 +12591,8 @@ if (!defined $child_pid) {
 if ($child_pid == 0) {
   chdir $workdir or die "Failed to chdir to $workdir: $!
 ";
+  # OpenCode 2 \`run\` resolves its directory from PWD before cwd.
+  $ENV{PWD} = $workdir;
   eval { setsid(); };
   exec { $command } $command, @args;
   die "Failed to exec $command: $!
@@ -14053,6 +14056,8 @@ function buildOpencodeArgs(job) {
   const command = findOpencode();
   const run = normalizeRunSpec(getJobRun(job));
   validateRunSpec(run);
+  if (HOST_GENERATION === 2)
+    return { command, args: buildOpencodeV2Args(run) };
   const args = ["run"];
   if (job.workdir) {
     args.push("--dir", job.workdir);
@@ -14097,6 +14102,42 @@ function buildOpencodeArgs(job) {
   const words = message.split(/\s+/).filter(Boolean);
   args.push("--", ...words);
   return { command, args };
+}
+function buildOpencodeV2Args(run) {
+  const unsupported = [
+    run.slashCommand && "slashCommand (OpenCode 2 `run` has no --command; put the instructions in prompt)",
+    run.port !== undefined && "port (OpenCode 2 `run` has no --port)",
+    run.share && "share (OpenCode 2 `run` has no --share)"
+  ].filter(Boolean);
+  if (unsupported.length) {
+    throw new Error(`Not supported on OpenCode 2: ${unsupported.join("; ")}`);
+  }
+  if (run.variant && !run.model) {
+    throw new Error("OpenCode 2 selects a variant through the model (provider/model#variant); set model too");
+  }
+  if (run.variant && run.model?.includes("#")) {
+    throw new Error("Set the variant either in model (provider/model#variant) or in variant, not both");
+  }
+  const args = ["run"];
+  if (run.attachUrl)
+    args.push("--server", run.attachUrl);
+  if (run.agent)
+    args.push("--agent", run.agent);
+  if (run.model)
+    args.push("--model", run.variant ? `${run.model}#${run.variant}` : run.model);
+  if (run.runFormat)
+    args.push("--format", run.runFormat);
+  if (run.title)
+    args.push("--title", run.title);
+  if (run.continue)
+    args.push("--continue");
+  if (run.session)
+    args.push("--session", run.session);
+  for (const file2 of run.files ?? [])
+    args.push("--file", file2);
+  const words = (run.prompt ?? "").split(/\s+/).filter(Boolean);
+  args.push("--", ...words);
+  return args;
 }
 function buildRunEnvironment() {
   const enhancedPath = getEnhancedPath();
@@ -14173,7 +14214,7 @@ function runJobNow(job) {
   try {
     child = spawn(command, args, {
       cwd: workdir,
-      env: buildRunEnvironment(),
+      env: { ...buildRunEnvironment(), PWD: workdir },
       stdio: ["ignore", "pipe", "pipe"]
     });
   } catch (error45) {
@@ -14368,122 +14409,120 @@ function getJobLogs(job, options) {
     return null;
   }
 }
-var SchedulerPlugin = async () => {
-  return {
-    tool: {
-      schedule_job: tool({
-        description: "Schedule a recurring job to run an opencode prompt. Uses launchd (Mac), systemd (Linux), Windows Task Scheduler, or cron fallback when needed.",
-        args: {
-          name: tool.schema.string().describe("A short name for the job (e.g. 'standing desk search')"),
-          schedule: tool.schema.string().describe("Cron expression: '0 9 * * *' (daily 9am), '0 */6 * * *' (every 6h), '30 8 * * 1' (Monday 8:30am)"),
-          prompt: tool.schema.string().optional().describe("The prompt message to send to the agent (e.g. 'Search for standing desk deals and notify me')."),
-          slashCommand: tool.schema.string().optional().describe("Optional: an opencode slash command to run instead of a prompt (e.g. 'test', 'build'). This is NOT a shell command."),
-          slashCommandArgs: tool.schema.string().optional().describe("Optional: arguments to pass to the slash command specified in slashCommand."),
-          files: tool.schema.string().optional().describe("Optional: comma-separated list of files/dirs to attach (maps to repeated --file)"),
-          agent: tool.schema.string().optional().describe("Optional: agent to use (maps to --agent)"),
-          model: tool.schema.string().optional().describe("Optional: model to use (maps to --model)"),
-          variant: tool.schema.string().optional().describe("Optional: model variant (maps to --variant)"),
-          title: tool.schema.string().optional().describe("Optional: session title (maps to --title)"),
-          share: tool.schema.boolean().optional().describe("Optional: share session (maps to --share)"),
-          continue: tool.schema.boolean().optional().describe("Optional: continue last session (maps to --continue)"),
-          session: tool.schema.string().optional().describe("Optional: session id (maps to --session)"),
-          runFormat: tool.schema.string().optional().describe("Optional: run output format (maps to opencode --format: default|json)"),
-          port: tool.schema.number().optional().describe("Optional: server port for local server (maps to --port)"),
-          source: tool.schema.string().optional().describe("Optional: source app (e.g. 'marketplace') - used for filtering"),
-          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
-          attachUrl: tool.schema.string().optional().describe("Optional: attach URL for opencode run (e.g. http://localhost:4096)."),
-          timeoutSeconds: tool.schema.number().optional().describe("Optional: max runtime in seconds (0 disables)."),
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const slug = args.source ? `${args.source}-${slugify(args.name)}` : slugify(args.name);
-          const workdir = normalizeWorkdirPath(args.scopeRoot || process.cwd());
-          const scopeId = deriveScopeId(workdir);
-          if (loadScopedJob(scopeId, slug)) {
-            return errorResult(format, `Job "${slug}" already exists in this workspace scope (${scopeId}). Delete it first or use a different name.`);
-          }
-          if (loadLegacyJob(slug)) {
-            return errorResult(format, `Job "${slug}" already exists (legacy scheduler storage). Delete it first or use a different name.`);
-          }
-          const parseFiles = (raw) => {
-            if (raw === undefined)
-              return;
-            if (typeof raw !== "string")
-              return;
-            const items = raw.split(",").map((item) => item.trim()).filter(Boolean);
-            return items.length ? items : undefined;
-          };
-          let runFormat;
-          try {
-            runFormat = parseRunFormatInput(args.runFormat);
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, msg);
-          }
-          const run = {
-            prompt: args.prompt,
-            slashCommand: args.slashCommand,
-            slashCommandArgs: args.slashCommandArgs,
-            files: parseFiles(args.files),
-            agent: args.agent,
-            model: args.model,
-            variant: args.variant,
-            title: args.title,
-            share: args.share,
-            continue: args.continue,
-            session: args.session,
-            runFormat,
-            attachUrl: args.attachUrl,
-            port: args.port
-          };
-          try {
-            validateRunSpec(normalizeRunSpec(run));
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, `Invalid run spec: ${msg}`);
-          }
-          let attachUrl;
-          try {
-            attachUrl = normalizeAttachUrl(args.attachUrl);
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, msg);
-          }
-          try {
-            validateCronExpression(args.schedule);
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, `Invalid cron schedule: ${msg}`);
-          }
-          const job = {
-            scopeId,
-            slug,
-            name: args.name,
-            schedule: args.schedule,
-            run: normalizeRunSpec(run),
-            prompt: args.prompt,
-            source: args.source,
-            workdir,
-            attachUrl,
-            timeoutSeconds: args.timeoutSeconds,
-            createdAt: new Date().toISOString()
-          };
-          try {
-            job.invocation = buildOpencodeArgs(job);
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, `Failed to build invocation: ${msg}`);
-          }
-          try {
-            saveJob(job);
-            const backend = installJob(job);
-            const platformName = backend;
-            const reliabilityLine = backend === "schtasks" ? "Windows note: scheduled runs use Task Scheduler directly. For advanced reliability guarantees, prefer simple cron schedules or split complex jobs." : backend === "cron" ? "Cron note: missed runs during sleep are not replayed. For catch-up behavior, use launchd or systemd when available." : "The job will run at the scheduled time. If your computer was asleep, it will catch up when it wakes.";
-            const primaryLine = run.slashCommand ? `Slash command: ${run.slashCommand}${run.slashCommandArgs ? ` ${run.slashCommandArgs}` : ""}` : `Prompt: ${(run.prompt ?? "").slice(0, 100)}${(run.prompt ?? "").length > 100 ? "..." : ""}`;
-            const attachLine = run.attachUrl ? `Attach URL: ${run.attachUrl}
+var TOOLS = {
+  schedule_job: tool({
+    description: "Schedule a recurring job to run an opencode prompt. Uses launchd (Mac), systemd (Linux), Windows Task Scheduler, or cron fallback when needed.",
+    args: {
+      name: tool.schema.string().describe("A short name for the job (e.g. 'standing desk search')"),
+      schedule: tool.schema.string().describe("Cron expression: '0 9 * * *' (daily 9am), '0 */6 * * *' (every 6h), '30 8 * * 1' (Monday 8:30am)"),
+      prompt: tool.schema.string().optional().describe("The prompt message to send to the agent (e.g. 'Search for standing desk deals and notify me')."),
+      slashCommand: tool.schema.string().optional().describe("Optional: an opencode slash command to run instead of a prompt (e.g. 'test', 'build'). This is NOT a shell command."),
+      slashCommandArgs: tool.schema.string().optional().describe("Optional: arguments to pass to the slash command specified in slashCommand."),
+      files: tool.schema.string().optional().describe("Optional: comma-separated list of files/dirs to attach (maps to repeated --file)"),
+      agent: tool.schema.string().optional().describe("Optional: agent to use (maps to --agent)"),
+      model: tool.schema.string().optional().describe("Optional: model to use (maps to --model)"),
+      variant: tool.schema.string().optional().describe("Optional: model variant (maps to --variant)"),
+      title: tool.schema.string().optional().describe("Optional: session title (maps to --title)"),
+      share: tool.schema.boolean().optional().describe("Optional: share session (maps to --share)"),
+      continue: tool.schema.boolean().optional().describe("Optional: continue last session (maps to --continue)"),
+      session: tool.schema.string().optional().describe("Optional: session id (maps to --session)"),
+      runFormat: tool.schema.string().optional().describe("Optional: run output format (maps to opencode --format: default|json)"),
+      port: tool.schema.number().optional().describe("Optional: server port for local server (maps to --port)"),
+      source: tool.schema.string().optional().describe("Optional: source app (e.g. 'marketplace') - used for filtering"),
+      scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
+      attachUrl: tool.schema.string().optional().describe("Optional: attach URL for opencode run (e.g. http://localhost:4096)."),
+      timeoutSeconds: tool.schema.number().optional().describe("Optional: max runtime in seconds (0 disables)."),
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const slug = args.source ? `${args.source}-${slugify(args.name)}` : slugify(args.name);
+      const workdir = normalizeWorkdirPath(args.scopeRoot || process.cwd());
+      const scopeId = deriveScopeId(workdir);
+      if (loadScopedJob(scopeId, slug)) {
+        return errorResult(format, `Job "${slug}" already exists in this workspace scope (${scopeId}). Delete it first or use a different name.`);
+      }
+      if (loadLegacyJob(slug)) {
+        return errorResult(format, `Job "${slug}" already exists (legacy scheduler storage). Delete it first or use a different name.`);
+      }
+      const parseFiles = (raw) => {
+        if (raw === undefined)
+          return;
+        if (typeof raw !== "string")
+          return;
+        const items = raw.split(",").map((item) => item.trim()).filter(Boolean);
+        return items.length ? items : undefined;
+      };
+      let runFormat;
+      try {
+        runFormat = parseRunFormatInput(args.runFormat);
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, msg);
+      }
+      const run = {
+        prompt: args.prompt,
+        slashCommand: args.slashCommand,
+        slashCommandArgs: args.slashCommandArgs,
+        files: parseFiles(args.files),
+        agent: args.agent,
+        model: args.model,
+        variant: args.variant,
+        title: args.title,
+        share: args.share,
+        continue: args.continue,
+        session: args.session,
+        runFormat,
+        attachUrl: args.attachUrl,
+        port: args.port
+      };
+      try {
+        validateRunSpec(normalizeRunSpec(run));
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, `Invalid run spec: ${msg}`);
+      }
+      let attachUrl;
+      try {
+        attachUrl = normalizeAttachUrl(args.attachUrl);
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, msg);
+      }
+      try {
+        validateCronExpression(args.schedule);
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, `Invalid cron schedule: ${msg}`);
+      }
+      const job = {
+        scopeId,
+        slug,
+        name: args.name,
+        schedule: args.schedule,
+        run: normalizeRunSpec(run),
+        prompt: args.prompt,
+        source: args.source,
+        workdir,
+        attachUrl,
+        timeoutSeconds: args.timeoutSeconds,
+        createdAt: new Date().toISOString()
+      };
+      try {
+        job.invocation = buildOpencodeArgs(job);
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, `Failed to build invocation: ${msg}`);
+      }
+      try {
+        saveJob(job);
+        const backend = installJob(job);
+        const platformName = backend;
+        const reliabilityLine = backend === "schtasks" ? "Windows note: scheduled runs use Task Scheduler directly. For advanced reliability guarantees, prefer simple cron schedules or split complex jobs." : backend === "cron" ? "Cron note: missed runs during sleep are not replayed. For catch-up behavior, use launchd or systemd when available." : "The job will run at the scheduled time. If your computer was asleep, it will catch up when it wakes.";
+        const primaryLine = run.slashCommand ? `Slash command: ${run.slashCommand}${run.slashCommandArgs ? ` ${run.slashCommandArgs}` : ""}` : `Prompt: ${(run.prompt ?? "").slice(0, 100)}${(run.prompt ?? "").length > 100 ? "..." : ""}`;
+        const attachLine = run.attachUrl ? `Attach URL: ${run.attachUrl}
 ` : "";
-            return okResult(format, `Scheduled "${args.name}"
+        return okResult(format, `Scheduled "${args.name}"
 
 Schedule: ${args.schedule} (${describeCron(args.schedule)})
 Platform: ${platformName}
@@ -14496,500 +14535,530 @@ Commands:
 - "run ${args.name} now" - run immediately
 - "show my jobs" - list all
 - "delete job ${args.name}" - remove`, { job });
-          } catch (error45) {
-            deleteJobFile(job);
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, `Failed to schedule job: ${msg}`);
-          }
-        }
-      }),
-      list_jobs: tool({
-        description: "List all scheduled jobs. Optionally filter by source app.",
-        args: {
-          source: tool.schema.string().optional().describe("Filter by source app (e.g. 'marketplace')"),
-          allScopes: tool.schema.boolean().optional().describe("List jobs across all scopes."),
-          includeLegacy: tool.schema.boolean().optional().describe("Include legacy jobs from ~/.config/opencode/jobs"),
-          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const scopeId = args.allScopes ? undefined : deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
-          let jobs = args.allScopes ? loadAllJobsAcrossScopes() : loadAllScopedJobs(scopeId);
-          if (args.includeLegacy) {
-            jobs = [...jobs, ...loadAllLegacyJobs()];
-          }
-          if (args.source) {
-            jobs = jobs.filter((j) => j.source === args.source || j.slug.startsWith(`${args.source}-`));
-          }
-          if (jobs.length === 0) {
-            const message = args.source ? `No jobs found for "${args.source}".` : `No scheduled jobs yet.
+      } catch (error45) {
+        deleteJobFile(job);
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, `Failed to schedule job: ${msg}`);
+      }
+    }
+  }),
+  list_jobs: tool({
+    description: "List all scheduled jobs. Optionally filter by source app.",
+    args: {
+      source: tool.schema.string().optional().describe("Filter by source app (e.g. 'marketplace')"),
+      allScopes: tool.schema.boolean().optional().describe("List jobs across all scopes."),
+      includeLegacy: tool.schema.boolean().optional().describe("Include legacy jobs from ~/.config/opencode/jobs"),
+      scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const scopeId = args.allScopes ? undefined : deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+      let jobs = args.allScopes ? loadAllJobsAcrossScopes() : loadAllScopedJobs(scopeId);
+      if (args.includeLegacy) {
+        jobs = [...jobs, ...loadAllLegacyJobs()];
+      }
+      if (args.source) {
+        jobs = jobs.filter((j) => j.source === args.source || j.slug.startsWith(`${args.source}-`));
+      }
+      if (jobs.length === 0) {
+        const message = args.source ? `No jobs found for "${args.source}".` : `No scheduled jobs yet.
 
 Try: "Schedule a daily job at 9am to search for standing desks"`;
-            return okResult(format, message, { jobs: [] });
+        return okResult(format, message, { jobs: [] });
+      }
+      const lines = jobs.map((j, i) => {
+        const run = (() => {
+          try {
+            return normalizeRunSpec(getJobRun(j));
+          } catch {
+            return;
           }
-          const lines = jobs.map((j, i) => {
-            const run = (() => {
-              try {
-                return normalizeRunSpec(getJobRun(j));
-              } catch {
-                return;
-              }
-            })();
-            const preview = run?.slashCommand ? `${run.slashCommand}${run.slashCommandArgs ? ` ${run.slashCommandArgs}` : ""}` : run?.prompt ?? j.prompt ?? "(missing prompt)";
-            const trimmed = preview.trim();
-            const snippet = trimmed.slice(0, 50) + (trimmed.length > 50 ? "..." : "");
-            return `${i + 1}. ${j.name} (${j.slug})
+        })();
+        const preview = run?.slashCommand ? `${run.slashCommand}${run.slashCommandArgs ? ` ${run.slashCommandArgs}` : ""}` : run?.prompt ?? j.prompt ?? "(missing prompt)";
+        const trimmed = preview.trim();
+        const snippet = trimmed.slice(0, 50) + (trimmed.length > 50 ? "..." : "");
+        return `${i + 1}. ${j.name} (${j.slug})
    ${describeCron(j.schedule)}
    ${snippet}`;
-          });
-          return okResult(format, `Scheduled Jobs
+      });
+      return okResult(format, `Scheduled Jobs
 
 ${lines.join(`
 
 `)}`, { jobs });
-        }
-      }),
-      get_version: tool({
-        description: "Show the scheduler plugin version and opencode binary info.",
-        args: {
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const packageInfo = loadPackageInfo();
-          const opencodePath = findOpencode();
-          const opencodeVersion = getOpencodeVersion(opencodePath);
-          const lines = [
-            `Scheduler Plugin: ${packageInfo.name}@${packageInfo.version}`,
-            `Opencode Binary: ${opencodePath}`,
-            `Opencode Version: ${opencodeVersion ?? "unknown"}`
-          ];
-          return okResult(format, lines.join(`
+    }
+  }),
+  get_version: tool({
+    description: "Show the scheduler plugin version and opencode binary info.",
+    args: {
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const packageInfo = loadPackageInfo();
+      const opencodePath = findOpencode();
+      const opencodeVersion = getOpencodeVersion(opencodePath);
+      const lines = [
+        `Scheduler Plugin: ${packageInfo.name}@${packageInfo.version}`,
+        `Opencode Binary: ${opencodePath}`,
+        `Opencode Version: ${opencodeVersion ?? "unknown"}`
+      ];
+      return okResult(format, lines.join(`
 `), {
-            plugin: packageInfo,
-            opencode: { path: opencodePath, version: opencodeVersion },
-            platform: platform()
-          });
-        }
-      }),
-      get_skill: tool({
-        description: "Get built-in skill templates to copy into your project.",
-        args: {
-          name: tool.schema.string().optional().describe("Skill name (default: scheduled-job-best-practices)"),
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const skill = getBuiltinSkill(args.name);
-          if (!skill) {
-            const available = listBuiltinSkills().map((s) => s.name).join(", ");
-            const requested = (args.name ?? "").trim();
-            const label = requested ? `"${requested}"` : "that name";
-            return errorResult(format, `No built-in skill found for ${label}. Available: ${available || "(none)"}`);
-          }
-          const renderedFiles = Object.entries(skill.files).map(([filename, content]) => `--- ${filename} ---
+        plugin: packageInfo,
+        opencode: { path: opencodePath, version: opencodeVersion },
+        platform: platform()
+      });
+    }
+  }),
+  get_skill: tool({
+    description: "Get built-in skill templates to copy into your project.",
+    args: {
+      name: tool.schema.string().optional().describe("Skill name (default: scheduled-job-best-practices)"),
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const skill = getBuiltinSkill(args.name);
+      if (!skill) {
+        const available = listBuiltinSkills().map((s) => s.name).join(", ");
+        const requested = (args.name ?? "").trim();
+        const label = requested ? `"${requested}"` : "that name";
+        return errorResult(format, `No built-in skill found for ${label}. Available: ${available || "(none)"}`);
+      }
+      const renderedFiles = Object.entries(skill.files).map(([filename, content]) => `--- ${filename} ---
 ${content.trim()}
 `).join(`
 `);
-          const output = [
-            `Skill: ${skill.name}`,
-            `Description: ${skill.description}`,
-            `Suggested path: ${skill.suggestedPath}`,
-            "",
-            "Copy the file(s) below into your repo:",
-            "",
-            renderedFiles
-          ].join(`
+      const output = [
+        `Skill: ${skill.name}`,
+        `Description: ${skill.description}`,
+        `Suggested path: ${skill.suggestedPath}`,
+        "",
+        "Copy the file(s) below into your repo:",
+        "",
+        renderedFiles
+      ].join(`
 `);
-          return okResult(format, output, { skill });
-        }
-      }),
-      install_skill: tool({
-        description: "Install a built-in skill into your repo's .opencode/skill directory.",
-        args: {
-          name: tool.schema.string().optional().describe("Skill name (default: scheduled-job-best-practices)"),
-          directory: tool.schema.string().optional().describe("Repo root directory to install into. Always provide this to ensure correct targeting \u2014 the server default may not match the active project."),
-          overwrite: tool.schema.boolean().optional().describe("Overwrite existing files (default false)."),
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const skill = getBuiltinSkill(args.name);
-          if (!skill) {
-            const available = listBuiltinSkills().map((s) => s.name).join(", ");
-            const requested = (args.name ?? "").trim();
-            const label = requested ? `"${requested}"` : "that name";
-            return errorResult(format, `No built-in skill found for ${label}. Available: ${available || "(none)"}`);
-          }
-          const directory = args.directory ?? process.cwd();
-          const overwrite = args.overwrite === true;
-          try {
-            const installed = installBuiltinSkill(skill, directory, overwrite);
-            const files = installed.files.map((file2) => `- ${file2}`).join(`
+      return okResult(format, output, { skill });
+    }
+  }),
+  install_skill: tool({
+    description: "Install a built-in skill into your repo's .opencode/skill directory.",
+    args: {
+      name: tool.schema.string().optional().describe("Skill name (default: scheduled-job-best-practices)"),
+      directory: tool.schema.string().optional().describe("Repo root directory to install into. Always provide this to ensure correct targeting \u2014 the server default may not match the active project."),
+      overwrite: tool.schema.boolean().optional().describe("Overwrite existing files (default false)."),
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const skill = getBuiltinSkill(args.name);
+      if (!skill) {
+        const available = listBuiltinSkills().map((s) => s.name).join(", ");
+        const requested = (args.name ?? "").trim();
+        const label = requested ? `"${requested}"` : "that name";
+        return errorResult(format, `No built-in skill found for ${label}. Available: ${available || "(none)"}`);
+      }
+      const directory = args.directory ?? process.cwd();
+      const overwrite = args.overwrite === true;
+      try {
+        const installed = installBuiltinSkill(skill, directory, overwrite);
+        const files = installed.files.map((file2) => `- ${file2}`).join(`
 `);
-            const output = [
-              `Installed skill: ${skill.name}`,
-              `Directory: ${installed.directory}`,
-              "",
-              "Files:",
-              files,
-              "",
-              `Next: add @${skill.name} to the top of scheduled job prompts.`
-            ].join(`
+        const output = [
+          `Installed skill: ${skill.name}`,
+          `Directory: ${installed.directory}`,
+          "",
+          "Files:",
+          files,
+          "",
+          `Next: add @${skill.name} to the top of scheduled job prompts.`
+        ].join(`
 `);
-            return okResult(format, output, { skill, installed });
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, `Failed to install skill: ${msg}`);
-          }
+        return okResult(format, output, { skill, installed });
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, `Failed to install skill: ${msg}`);
+      }
+    }
+  }),
+  get_job: tool({
+    description: "Get details for a scheduled job",
+    args: {
+      name: tool.schema.string().describe("The job name or slug"),
+      scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+      const job = findJobByName(args.name, { scopeId });
+      if (!job) {
+        return errorResult(format, `Job "${args.name}" not found.`);
+      }
+      return okResult(format, formatJobDetails(job), { job });
+    }
+  }),
+  update_job: tool({
+    description: "Update a scheduled job",
+    args: {
+      name: tool.schema.string().describe("The job name or slug"),
+      scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
+      schedule: tool.schema.string().optional().describe("Updated cron expression"),
+      prompt: tool.schema.string().optional().describe("Updated prompt message to send to the agent."),
+      slashCommand: tool.schema.string().optional().describe("Updated opencode slash command (e.g. 'test', 'build'). This is NOT a shell command."),
+      slashCommandArgs: tool.schema.string().optional().describe("Updated arguments for the slash command."),
+      files: tool.schema.string().optional().describe("Updated comma-separated list of files/dirs to attach"),
+      agent: tool.schema.string().optional().describe("Updated agent (maps to --agent)"),
+      model: tool.schema.string().optional().describe("Updated model (maps to --model)"),
+      variant: tool.schema.string().optional().describe("Updated model variant (maps to --variant)"),
+      title: tool.schema.string().optional().describe("Updated session title (maps to --title)"),
+      share: tool.schema.boolean().optional().describe("Updated share flag (maps to --share)"),
+      continue: tool.schema.boolean().optional().describe("Updated continue flag (maps to --continue)"),
+      session: tool.schema.string().optional().describe("Updated session id (maps to --session)"),
+      runFormat: tool.schema.string().optional().describe("Updated run output format (default|json)"),
+      port: tool.schema.number().optional().describe("Updated port (maps to --port)"),
+      timeoutSeconds: tool.schema.number().optional().describe("Updated timeout in seconds (0 disables)"),
+      workdir: tool.schema.string().optional().describe("Updated working directory"),
+      attachUrl: tool.schema.string().optional().describe("Updated attach URL (set to empty to clear)"),
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+      const job = findJobByName(args.name, { scopeId });
+      if (!job) {
+        return errorResult(format, `Job "${args.name}" not found.`);
+      }
+      const updates = {};
+      const parseFiles = (raw) => {
+        if (raw === undefined)
+          return;
+        if (typeof raw !== "string")
+          return;
+        const items = raw.split(",").map((item) => item.trim()).filter(Boolean);
+        return items.length ? items : undefined;
+      };
+      const currentRun = (() => {
+        try {
+          return normalizeRunSpec(getJobRun(job));
+        } catch {
+          return {};
         }
-      }),
-      get_job: tool({
-        description: "Get details for a scheduled job",
-        args: {
-          name: tool.schema.string().describe("The job name or slug"),
-          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
-          const job = findJobByName(args.name, { scopeId });
-          if (!job) {
-            return errorResult(format, `Job "${args.name}" not found.`);
-          }
-          return okResult(format, formatJobDetails(job), { job });
+      })();
+      const nextRunCandidate = {
+        ...currentRun,
+        prompt: args.prompt !== undefined ? args.prompt : currentRun.prompt,
+        slashCommand: args.slashCommand !== undefined ? args.slashCommand : currentRun.slashCommand,
+        slashCommandArgs: args.slashCommandArgs !== undefined ? args.slashCommandArgs : currentRun.slashCommandArgs,
+        files: args.files !== undefined ? parseFiles(args.files) : currentRun.files,
+        agent: args.agent !== undefined ? args.agent : currentRun.agent,
+        model: args.model !== undefined ? args.model : currentRun.model,
+        variant: args.variant !== undefined ? args.variant : currentRun.variant,
+        title: args.title !== undefined ? args.title : currentRun.title,
+        share: args.share !== undefined ? args.share : currentRun.share,
+        continue: args.continue !== undefined ? args.continue : currentRun.continue,
+        session: args.session !== undefined ? args.session : currentRun.session,
+        runFormat: args.runFormat !== undefined ? parseRunFormatInput(args.runFormat) : currentRun.runFormat,
+        attachUrl: args.attachUrl !== undefined ? args.attachUrl : currentRun.attachUrl,
+        port: args.port !== undefined ? args.port : currentRun.port
+      };
+      try {
+        updates.run = normalizeRunSpec(nextRunCandidate);
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, `Invalid run spec: ${msg}`);
+      }
+      if (args.schedule !== undefined) {
+        if (!args.schedule.trim()) {
+          return errorResult(format, "Schedule cannot be empty.");
         }
-      }),
-      update_job: tool({
-        description: "Update a scheduled job",
-        args: {
-          name: tool.schema.string().describe("The job name or slug"),
-          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
-          schedule: tool.schema.string().optional().describe("Updated cron expression"),
-          prompt: tool.schema.string().optional().describe("Updated prompt message to send to the agent."),
-          slashCommand: tool.schema.string().optional().describe("Updated opencode slash command (e.g. 'test', 'build'). This is NOT a shell command."),
-          slashCommandArgs: tool.schema.string().optional().describe("Updated arguments for the slash command."),
-          files: tool.schema.string().optional().describe("Updated comma-separated list of files/dirs to attach"),
-          agent: tool.schema.string().optional().describe("Updated agent (maps to --agent)"),
-          model: tool.schema.string().optional().describe("Updated model (maps to --model)"),
-          variant: tool.schema.string().optional().describe("Updated model variant (maps to --variant)"),
-          title: tool.schema.string().optional().describe("Updated session title (maps to --title)"),
-          share: tool.schema.boolean().optional().describe("Updated share flag (maps to --share)"),
-          continue: tool.schema.boolean().optional().describe("Updated continue flag (maps to --continue)"),
-          session: tool.schema.string().optional().describe("Updated session id (maps to --session)"),
-          runFormat: tool.schema.string().optional().describe("Updated run output format (default|json)"),
-          port: tool.schema.number().optional().describe("Updated port (maps to --port)"),
-          timeoutSeconds: tool.schema.number().optional().describe("Updated timeout in seconds (0 disables)"),
-          workdir: tool.schema.string().optional().describe("Updated working directory"),
-          attachUrl: tool.schema.string().optional().describe("Updated attach URL (set to empty to clear)"),
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
-          const job = findJobByName(args.name, { scopeId });
-          if (!job) {
-            return errorResult(format, `Job "${args.name}" not found.`);
-          }
-          const updates = {};
-          const parseFiles = (raw) => {
-            if (raw === undefined)
-              return;
-            if (typeof raw !== "string")
-              return;
-            const items = raw.split(",").map((item) => item.trim()).filter(Boolean);
-            return items.length ? items : undefined;
-          };
-          const currentRun = (() => {
-            try {
-              return normalizeRunSpec(getJobRun(job));
-            } catch {
-              return {};
-            }
-          })();
-          const nextRunCandidate = {
-            ...currentRun,
-            prompt: args.prompt !== undefined ? args.prompt : currentRun.prompt,
-            slashCommand: args.slashCommand !== undefined ? args.slashCommand : currentRun.slashCommand,
-            slashCommandArgs: args.slashCommandArgs !== undefined ? args.slashCommandArgs : currentRun.slashCommandArgs,
-            files: args.files !== undefined ? parseFiles(args.files) : currentRun.files,
-            agent: args.agent !== undefined ? args.agent : currentRun.agent,
-            model: args.model !== undefined ? args.model : currentRun.model,
-            variant: args.variant !== undefined ? args.variant : currentRun.variant,
-            title: args.title !== undefined ? args.title : currentRun.title,
-            share: args.share !== undefined ? args.share : currentRun.share,
-            continue: args.continue !== undefined ? args.continue : currentRun.continue,
-            session: args.session !== undefined ? args.session : currentRun.session,
-            runFormat: args.runFormat !== undefined ? parseRunFormatInput(args.runFormat) : currentRun.runFormat,
-            attachUrl: args.attachUrl !== undefined ? args.attachUrl : currentRun.attachUrl,
-            port: args.port !== undefined ? args.port : currentRun.port
-          };
-          try {
-            updates.run = normalizeRunSpec(nextRunCandidate);
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, `Invalid run spec: ${msg}`);
-          }
-          if (args.schedule !== undefined) {
-            if (!args.schedule.trim()) {
-              return errorResult(format, "Schedule cannot be empty.");
-            }
-            try {
-              validateCronExpression(args.schedule);
-            } catch (error45) {
-              const msg = error45 instanceof Error ? error45.message : String(error45);
-              return errorResult(format, `Invalid cron schedule: ${msg}`);
-            }
-            updates.schedule = args.schedule;
-          }
-          if (args.prompt !== undefined) {
-            if (!args.prompt.trim()) {
-              return errorResult(format, "Prompt cannot be empty.");
-            }
-            updates.prompt = args.prompt;
-          }
-          if (args.workdir !== undefined) {
-            if (!args.workdir.trim()) {
-              return errorResult(format, "Working directory cannot be empty.");
-            }
-            const normalizedWorkdir = normalizeWorkdirPath(args.workdir);
-            updates.workdir = normalizedWorkdir;
-            updates.scopeId = deriveScopeId(normalizedWorkdir);
-          }
-          if (args.attachUrl !== undefined) {
-            try {
-              updates.attachUrl = normalizeAttachUrl(args.attachUrl);
-            } catch (error45) {
-              const msg = error45 instanceof Error ? error45.message : String(error45);
-              return errorResult(format, msg);
-            }
-          }
-          if (args.timeoutSeconds !== undefined) {
-            updates.timeoutSeconds = args.timeoutSeconds;
-          }
-          if (Object.keys(updates).length === 0) {
-            return errorResult(format, "No updates provided.");
-          }
-          const updatedJob = {
-            ...job,
-            ...updates,
-            updatedAt: new Date().toISOString()
-          };
-          try {
-            updatedJob.invocation = buildOpencodeArgs(updatedJob);
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, `Failed to build invocation: ${msg}`);
-          }
-          try {
-            const oldScopeId = job.scopeId || deriveScopeId(job.workdir || homedir());
-            const nextScopeId = updatedJob.scopeId || deriveScopeId(updatedJob.workdir || homedir());
-            const scopeChanged = oldScopeId !== nextScopeId;
-            if (scopeChanged) {
-              uninstallJob(job);
-            }
-            saveJob(updatedJob);
-            installJob(updatedJob);
-            if (scopeChanged) {
-              const oldPath = jobFilePath(oldScopeId, job.slug);
-              if (existsSync(oldPath)) {
-                try {
-                  unlinkSync(oldPath);
-                } catch {}
-              }
-            }
-            return okResult(format, `Updated job "${updatedJob.name}"`, { job: updatedJob });
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            try {
-              saveJob(job);
-              installJob(job);
-            } catch {}
-            return errorResult(format, `Failed to update job: ${msg}`);
-          }
+        try {
+          validateCronExpression(args.schedule);
+        } catch (error45) {
+          const msg = error45 instanceof Error ? error45.message : String(error45);
+          return errorResult(format, `Invalid cron schedule: ${msg}`);
         }
-      }),
-      delete_job: tool({
-        description: "Delete a scheduled job",
-        args: {
-          name: tool.schema.string().describe("The job name or slug to delete"),
-          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
-          const job = findJobByName(args.name, { scopeId });
-          if (!job) {
-            return errorResult(format, `Job "${args.name}" not found.`);
-          }
+        updates.schedule = args.schedule;
+      }
+      if (args.prompt !== undefined) {
+        if (!args.prompt.trim()) {
+          return errorResult(format, "Prompt cannot be empty.");
+        }
+        updates.prompt = args.prompt;
+      }
+      if (args.workdir !== undefined) {
+        if (!args.workdir.trim()) {
+          return errorResult(format, "Working directory cannot be empty.");
+        }
+        const normalizedWorkdir = normalizeWorkdirPath(args.workdir);
+        updates.workdir = normalizedWorkdir;
+        updates.scopeId = deriveScopeId(normalizedWorkdir);
+      }
+      if (args.attachUrl !== undefined) {
+        try {
+          updates.attachUrl = normalizeAttachUrl(args.attachUrl);
+        } catch (error45) {
+          const msg = error45 instanceof Error ? error45.message : String(error45);
+          return errorResult(format, msg);
+        }
+      }
+      if (args.timeoutSeconds !== undefined) {
+        updates.timeoutSeconds = args.timeoutSeconds;
+      }
+      if (Object.keys(updates).length === 0) {
+        return errorResult(format, "No updates provided.");
+      }
+      const updatedJob = {
+        ...job,
+        ...updates,
+        updatedAt: new Date().toISOString()
+      };
+      try {
+        updatedJob.invocation = buildOpencodeArgs(updatedJob);
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, `Failed to build invocation: ${msg}`);
+      }
+      try {
+        const oldScopeId = job.scopeId || deriveScopeId(job.workdir || homedir());
+        const nextScopeId = updatedJob.scopeId || deriveScopeId(updatedJob.workdir || homedir());
+        const scopeChanged = oldScopeId !== nextScopeId;
+        if (scopeChanged) {
           uninstallJob(job);
-          deleteJobFile(job);
-          const legacyPath = join(LEGACY_JOBS_DIR, `${job.slug}.json`);
-          if (existsSync(legacyPath)) {
+        }
+        saveJob(updatedJob);
+        installJob(updatedJob);
+        if (scopeChanged) {
+          const oldPath = jobFilePath(oldScopeId, job.slug);
+          if (existsSync(oldPath)) {
             try {
-              unlinkSync(legacyPath);
+              unlinkSync(oldPath);
             } catch {}
           }
-          return okResult(format, `Deleted job "${job.name}"`, { job });
         }
-      }),
-      cleanup_global: tool({
-        description: "Clean up scheduler artifacts globally across all scopes. Removes job definitions everywhere; optionally remove logs and run history.",
-        args: {
-          includeHistory: tool.schema.boolean().optional().describe("Also remove run history and logs across all scopes (default false)."),
-          confirm: tool.schema.boolean().optional().describe("Set true to execute deletion. Default is dry run with no destructive changes."),
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const includeHistory = args.includeHistory === true;
-          const dryRun = args.confirm !== true;
-          const plan = buildGlobalCleanupPlan(includeHistory);
-          const execution = executeGlobalCleanup(plan, { dryRun, includeHistory });
-          const output = formatGlobalCleanupOutput(execution);
-          return okResult(format, output, {
-            dryRun: execution.dryRun,
-            includeHistory: execution.includeHistory,
-            removed: execution.removed,
-            errors: execution.errors,
-            scopeIds: plan.scopeIds,
-            jobsConsidered: plan.jobsToUninstall.length
-          });
+        return okResult(format, `Updated job "${updatedJob.name}"`, { job: updatedJob });
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        try {
+          saveJob(job);
+          installJob(job);
+        } catch {}
+        return errorResult(format, `Failed to update job: ${msg}`);
+      }
+    }
+  }),
+  delete_job: tool({
+    description: "Delete a scheduled job",
+    args: {
+      name: tool.schema.string().describe("The job name or slug to delete"),
+      scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+      const job = findJobByName(args.name, { scopeId });
+      if (!job) {
+        return errorResult(format, `Job "${args.name}" not found.`);
+      }
+      uninstallJob(job);
+      deleteJobFile(job);
+      const legacyPath = join(LEGACY_JOBS_DIR, `${job.slug}.json`);
+      if (existsSync(legacyPath)) {
+        try {
+          unlinkSync(legacyPath);
+        } catch {}
+      }
+      return okResult(format, `Deleted job "${job.name}"`, { job });
+    }
+  }),
+  cleanup_global: tool({
+    description: "Clean up scheduler artifacts globally across all scopes. Removes job definitions everywhere; optionally remove logs and run history.",
+    args: {
+      includeHistory: tool.schema.boolean().optional().describe("Also remove run history and logs across all scopes (default false)."),
+      confirm: tool.schema.boolean().optional().describe("Set true to execute deletion. Default is dry run with no destructive changes."),
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const includeHistory = args.includeHistory === true;
+      const dryRun = args.confirm !== true;
+      const plan = buildGlobalCleanupPlan(includeHistory);
+      const execution = executeGlobalCleanup(plan, { dryRun, includeHistory });
+      const output = formatGlobalCleanupOutput(execution);
+      return okResult(format, output, {
+        dryRun: execution.dryRun,
+        includeHistory: execution.includeHistory,
+        removed: execution.removed,
+        errors: execution.errors,
+        scopeIds: plan.scopeIds,
+        jobsConsidered: plan.jobsToUninstall.length
+      });
+    }
+  }),
+  run_job: tool({
+    description: "Run a scheduled job immediately",
+    args: {
+      name: tool.schema.string().describe("The job name or slug"),
+      scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
+      prompt: tool.schema.string().optional().describe("Override prompt message for this run."),
+      slashCommand: tool.schema.string().optional().describe("Override opencode slash command for this run. This is NOT a shell command."),
+      slashCommandArgs: tool.schema.string().optional().describe("Override arguments for the slash command."),
+      files: tool.schema.string().optional().describe("Override comma-separated files/dirs to attach"),
+      agent: tool.schema.string().optional().describe("Override agent"),
+      model: tool.schema.string().optional().describe("Override model"),
+      variant: tool.schema.string().optional().describe("Override variant"),
+      title: tool.schema.string().optional().describe("Override title"),
+      share: tool.schema.boolean().optional().describe("Override share flag"),
+      continue: tool.schema.boolean().optional().describe("Override continue flag"),
+      session: tool.schema.string().optional().describe("Override session id"),
+      runFormat: tool.schema.string().optional().describe("Override run output format (default|json)"),
+      port: tool.schema.number().optional().describe("Override port"),
+      attachUrl: tool.schema.string().optional().describe("Override attach URL"),
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+      const job = findJobByName(args.name, { scopeId });
+      if (!job) {
+        return errorResult(format, `Job "${args.name}" not found. Use list_jobs to see available jobs.`);
+      }
+      const parseFiles = (raw) => {
+        if (raw === undefined)
+          return;
+        if (typeof raw !== "string")
+          return;
+        const items = raw.split(",").map((item) => item.trim()).filter(Boolean);
+        return items.length ? items : undefined;
+      };
+      const baseRun = (() => {
+        try {
+          return normalizeRunSpec(getJobRun(job));
+        } catch {
+          return {};
         }
-      }),
-      run_job: tool({
-        description: "Run a scheduled job immediately",
-        args: {
-          name: tool.schema.string().describe("The job name or slug"),
-          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
-          prompt: tool.schema.string().optional().describe("Override prompt message for this run."),
-          slashCommand: tool.schema.string().optional().describe("Override opencode slash command for this run. This is NOT a shell command."),
-          slashCommandArgs: tool.schema.string().optional().describe("Override arguments for the slash command."),
-          files: tool.schema.string().optional().describe("Override comma-separated files/dirs to attach"),
-          agent: tool.schema.string().optional().describe("Override agent"),
-          model: tool.schema.string().optional().describe("Override model"),
-          variant: tool.schema.string().optional().describe("Override variant"),
-          title: tool.schema.string().optional().describe("Override title"),
-          share: tool.schema.boolean().optional().describe("Override share flag"),
-          continue: tool.schema.boolean().optional().describe("Override continue flag"),
-          session: tool.schema.string().optional().describe("Override session id"),
-          runFormat: tool.schema.string().optional().describe("Override run output format (default|json)"),
-          port: tool.schema.number().optional().describe("Override port"),
-          attachUrl: tool.schema.string().optional().describe("Override attach URL"),
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
-          const job = findJobByName(args.name, { scopeId });
-          if (!job) {
-            return errorResult(format, `Job "${args.name}" not found. Use list_jobs to see available jobs.`);
-          }
-          const parseFiles = (raw) => {
-            if (raw === undefined)
-              return;
-            if (typeof raw !== "string")
-              return;
-            const items = raw.split(",").map((item) => item.trim()).filter(Boolean);
-            return items.length ? items : undefined;
-          };
-          const baseRun = (() => {
-            try {
-              return normalizeRunSpec(getJobRun(job));
-            } catch {
-              return {};
-            }
-          })();
-          const overrideCandidate = {
-            ...baseRun,
-            prompt: args.prompt !== undefined ? args.prompt : baseRun.prompt,
-            slashCommand: args.slashCommand !== undefined ? args.slashCommand : baseRun.slashCommand,
-            slashCommandArgs: args.slashCommandArgs !== undefined ? args.slashCommandArgs : baseRun.slashCommandArgs,
-            files: args.files !== undefined ? parseFiles(args.files) : baseRun.files,
-            agent: args.agent !== undefined ? args.agent : baseRun.agent,
-            model: args.model !== undefined ? args.model : baseRun.model,
-            variant: args.variant !== undefined ? args.variant : baseRun.variant,
-            title: args.title !== undefined ? args.title : baseRun.title,
-            share: args.share !== undefined ? args.share : baseRun.share,
-            continue: args.continue !== undefined ? args.continue : baseRun.continue,
-            session: args.session !== undefined ? args.session : baseRun.session,
-            runFormat: args.runFormat !== undefined ? parseRunFormatInput(args.runFormat) : baseRun.runFormat,
-            port: args.port !== undefined ? args.port : baseRun.port,
-            attachUrl: args.attachUrl !== undefined ? args.attachUrl : baseRun.attachUrl
-          };
-          let runOverride;
-          try {
-            runOverride = normalizeRunSpec(overrideCandidate);
-            validateRunSpec(runOverride);
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, `Invalid run override: ${msg}`);
-          }
-          const runJob = {
-            ...job,
-            run: runOverride
-          };
-          let runResult;
-          try {
-            runResult = runJobNow(runJob);
-          } catch (error45) {
-            const msg = error45 instanceof Error ? error45.message : String(error45);
-            return errorResult(format, `Failed to start job "${job.name}": ${msg}`);
-          }
-          const logs = getJobLogs(runJob);
-          const attachHint = runOverride.attachUrl ? `
+      })();
+      const overrideCandidate = {
+        ...baseRun,
+        prompt: args.prompt !== undefined ? args.prompt : baseRun.prompt,
+        slashCommand: args.slashCommand !== undefined ? args.slashCommand : baseRun.slashCommand,
+        slashCommandArgs: args.slashCommandArgs !== undefined ? args.slashCommandArgs : baseRun.slashCommandArgs,
+        files: args.files !== undefined ? parseFiles(args.files) : baseRun.files,
+        agent: args.agent !== undefined ? args.agent : baseRun.agent,
+        model: args.model !== undefined ? args.model : baseRun.model,
+        variant: args.variant !== undefined ? args.variant : baseRun.variant,
+        title: args.title !== undefined ? args.title : baseRun.title,
+        share: args.share !== undefined ? args.share : baseRun.share,
+        continue: args.continue !== undefined ? args.continue : baseRun.continue,
+        session: args.session !== undefined ? args.session : baseRun.session,
+        runFormat: args.runFormat !== undefined ? parseRunFormatInput(args.runFormat) : baseRun.runFormat,
+        port: args.port !== undefined ? args.port : baseRun.port,
+        attachUrl: args.attachUrl !== undefined ? args.attachUrl : baseRun.attachUrl
+      };
+      let runOverride;
+      try {
+        runOverride = normalizeRunSpec(overrideCandidate);
+        validateRunSpec(runOverride);
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, `Invalid run override: ${msg}`);
+      }
+      const runJob = {
+        ...job,
+        run: runOverride
+      };
+      let runResult;
+      try {
+        runResult = runJobNow(runJob);
+      } catch (error45) {
+        const msg = error45 instanceof Error ? error45.message : String(error45);
+        return errorResult(format, `Failed to start job "${job.name}": ${msg}`);
+      }
+      const logs = getJobLogs(runJob);
+      const attachHint = runOverride.attachUrl ? `
 Attach: opencode attach ${runOverride.attachUrl}` : "";
-          const logSection = logs ? `
+      const logSection = logs ? `
 Latest logs:
 ${logs}` : `
 No logs yet. Check again soon.`;
-          return okResult(format, `Triggered "${job.name}" (fire-and-forget).
+      return okResult(format, `Triggered "${job.name}" (fire-and-forget).
 Logs: ${runResult.logPath}${attachHint}${logSection}`, {
-            job: runResult.job ?? job,
-            startedAt: runResult.startedAt,
-            logPath: runResult.logPath,
-            pid: runResult.pid
-          });
-        }
-      }),
-      job_logs: tool({
-        description: "View the latest logs from a scheduled job",
-        args: {
-          name: tool.schema.string().describe("The job name or slug"),
-          scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
-          lines: tool.schema.number().optional().describe("Number of lines from the end of the log (default 200)."),
-          format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
-        },
-        async execute(args) {
-          const format = normalizeFormat(args.format);
-          const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
-          const job = findJobByName(args.name, { scopeId });
-          if (!job) {
-            return errorResult(format, `Job "${args.name}" not found.`);
-          }
-          const tailLines = typeof args.lines === "number" && Number.isFinite(args.lines) ? args.lines : 200;
-          const logs = getJobLogs(job, { tailLines, maxChars: 20000 });
-          const logPath = getLogPath(job);
-          if (!logs) {
-            return okResult(format, `No logs found for "${job.name}". The job may not have run yet.`, {
-              job,
-              logPath,
-              logs: ""
-            });
-          }
-          return okResult(format, `Logs for ${job.name}
+        job: runResult.job ?? job,
+        startedAt: runResult.startedAt,
+        logPath: runResult.logPath,
+        pid: runResult.pid
+      });
+    }
+  }),
+  job_logs: tool({
+    description: "View the latest logs from a scheduled job",
+    args: {
+      name: tool.schema.string().describe("The job name or slug"),
+      scopeRoot: tool.schema.string().describe("The project root directory for scoping. Always provide this to ensure correct project scoping \u2014 the server default may not match the active project."),
+      lines: tool.schema.number().optional().describe("Number of lines from the end of the log (default 200)."),
+      format: tool.schema.string().optional().describe("Optional: output format ('text' or 'json').")
+    },
+    async execute(args) {
+      const format = normalizeFormat(args.format);
+      const scopeId = deriveScopeId(normalizeWorkdirPath(args.scopeRoot || process.cwd()));
+      const job = findJobByName(args.name, { scopeId });
+      if (!job) {
+        return errorResult(format, `Job "${args.name}" not found.`);
+      }
+      const tailLines = typeof args.lines === "number" && Number.isFinite(args.lines) ? args.lines : 200;
+      const logs = getJobLogs(job, { tailLines, maxChars: 20000 });
+      const logPath = getLogPath(job);
+      if (!logs) {
+        return okResult(format, `No logs found for "${job.name}". The job may not have run yet.`, {
+          job,
+          logPath,
+          logs: ""
+        });
+      }
+      return okResult(format, `Logs for ${job.name}
 
 ${logs}`, { job, logPath, logs });
-        }
-      })
     }
-  };
+  })
 };
-var src_default = SchedulerPlugin;
+var SchedulerPlugin = async () => {
+  HOST_GENERATION = 1;
+  return { tool: TOOLS };
+};
+async function setupV2(ctx) {
+  HOST_GENERATION = 2;
+  const definitions = Object.entries(TOOLS).map(([name, definition]) => {
+    const schema = tool.schema.object(definition.args);
+    const { $schema: _ignored, ...input } = tool.schema.toJSONSchema(schema);
+    return { name, definition, schema, input };
+  });
+  await ctx.tool.transform((editor) => {
+    for (const { name, definition, schema, input } of definitions) {
+      editor.add({
+        name,
+        description: definition.description,
+        input,
+        execute: async (raw) => {
+          const parsed = schema.safeParse(raw ?? {});
+          if (!parsed.success) {
+            return { content: `Invalid arguments for ${name}: ${parsed.error.message}` };
+          }
+          const output = await definition.execute(parsed.data, undefined);
+          return { content: typeof output === "string" ? output : JSON.stringify(output) };
+        }
+      });
+    }
+  });
+}
+var src_default = {
+  id: "opencode-scheduler",
+  server: SchedulerPlugin,
+  setup: setupV2
+};
 export {
-  src_default as default,
-  SchedulerPlugin
+  src_default as default
 };

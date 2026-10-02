@@ -20,6 +20,26 @@ Add to your `opencode.json`:
 }
 ```
 
+On OpenCode 2, the key is `plugins` (in `opencode.jsonc`). One package serves both:
+OpenCode 1 (>= 1.18.29) loads its `server()` entry, OpenCode 2 its `setup()` entry.
+
+### OpenCode 2 differences
+
+OpenCode 2's `opencode run` dropped several flags, so on OpenCode 2:
+
+- `slashCommand`, `port` and `share` are rejected when a job is created or updated.
+  Put a slash command's instructions in `prompt` instead.
+- `variant` is joined onto the model as `provider/model#variant` and needs `model`.
+- `attachUrl` maps to `--server`. Without it, runs use the background service
+  (`opencode serve --service`) when one is registered, or a private server.
+- The job directory reaches `run` through the working directory and `PWD`, not `--dir`.
+- Runs never wait for input: `run` cancels questions and rejects permission requests
+  with feedback, and the model carries on. `OPENCODE_PERMISSION` is not read.
+
+Jobs store the invocation built for the host that created them, so keep OpenCode 1 and
+OpenCode 2 job storage (`~/.config/opencode/scheduler`) and scheduler units apart if
+both run on one machine.
+
 ## Examples
 
 **Daily deal hunting:**

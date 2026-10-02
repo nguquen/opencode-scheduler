@@ -13,6 +13,9 @@
  */
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
+import type { Plugin as PluginV2 } from "@opencode/plugin"
+
+type PluginV2Context = PluginV2.Context
 import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs"
 import { basename, dirname, join, resolve as resolvePath } from "path"
 import { homedir, platform } from "os"
@@ -29,6 +32,11 @@ const SUPERVISOR_PATH = join(SCHEDULER_DIR, "supervisor.pl")
 const SCHEDULER_CONFIG = join(OPENCODE_CONFIG, "opencode-scheduler.json")
 
 // Platform detection
+// Set by the entry point the host calls. Decides which `opencode run` flags
+// job invocations use: OpenCode 2 dropped --dir, --attach, --variant,
+// --command, --port and --share.
+let HOST_GENERATION: 1 | 2 = 1
+
 const IS_MAC = platform() === "darwin"
 const IS_LINUX = platform() === "linux"
 const IS_WINDOWS = platform() === "win32"
@@ -281,6 +289,8 @@ if (!defined $child_pid) {
 
 if ($child_pid == 0) {
   chdir $workdir or die "Failed to chdir to $workdir: $!\n";
+  # OpenCode 2 \`run\` resolves its directory from PWD before cwd.
+  $ENV{PWD} = $workdir;
   eval { setsid(); };
   exec { $command } $command, @args;
   die "Failed to exec $command: $!\n";
@@ -2179,6 +2189,8 @@ function buildOpencodeArgs(job: Job): { command: string; args: string[] } {
   const run = normalizeRunSpec(getJobRun(job))
   validateRunSpec(run)
 
+  if (HOST_GENERATION === 2) return { command, args: buildOpencodeV2Args(run) }
+
   const args = ["run"]
 
   if (job.workdir) {
@@ -2242,6 +2254,44 @@ function buildOpencodeArgs(job: Job): { command: string; args: string[] } {
   args.push("--", ...words)
 
   return { command, args }
+}
+
+// OpenCode 2 `run`: the directory comes from PWD/cwd (the supervisor and
+// run_job set both to the job workdir), the server from --server or the
+// background service, and the variant rides on the model as provider/model#variant.
+// Questions are cancelled and permission asks rejected without --auto, which
+// matches the OpenCode 1 `question: deny` policy, so no extra flag is needed.
+function buildOpencodeV2Args(run: JobRunSpec): string[] {
+  const unsupported = [
+    run.slashCommand && "slashCommand (OpenCode 2 `run` has no --command; put the instructions in prompt)",
+    run.port !== undefined && "port (OpenCode 2 `run` has no --port)",
+    run.share && "share (OpenCode 2 `run` has no --share)",
+  ].filter(Boolean)
+  if (unsupported.length) {
+    throw new Error(`Not supported on OpenCode 2: ${unsupported.join("; ")}`)
+  }
+  if (run.variant && !run.model) {
+    throw new Error("OpenCode 2 selects a variant through the model (provider/model#variant); set model too")
+  }
+  if (run.variant && run.model?.includes("#")) {
+    throw new Error("Set the variant either in model (provider/model#variant) or in variant, not both")
+  }
+
+  const args = ["run"]
+  if (run.attachUrl) args.push("--server", run.attachUrl)
+  if (run.agent) args.push("--agent", run.agent)
+  if (run.model) args.push("--model", run.variant ? `${run.model}#${run.variant}` : run.model)
+  if (run.runFormat) args.push("--format", run.runFormat)
+  if (run.title) args.push("--title", run.title)
+  if (run.continue) args.push("--continue")
+  if (run.session) args.push("--session", run.session)
+  for (const file of run.files ?? []) args.push("--file", file)
+
+  // Same word splitting as OpenCode 1: `run` quote-wraps any argument that
+  // contains a space.
+  const words = (run.prompt ?? "").split(/\s+/).filter(Boolean)
+  args.push("--", ...words)
+  return args
 }
 
 function buildRunEnvironment(): NodeJS.ProcessEnv {
@@ -2327,7 +2377,8 @@ function runJobNow(job: Job): { startedAt: string; logPath: string; pid?: number
   try {
     child = spawn(command, args, {
       cwd: workdir,
-      env: buildRunEnvironment(),
+      // OpenCode 2 `run` resolves its directory from PWD before cwd.
+      env: { ...buildRunEnvironment(), PWD: workdir },
       stdio: ["ignore", "pipe", "pipe"],
     })
   } catch (error) {
@@ -2550,9 +2601,7 @@ function getJobLogs(job: Job, options?: { tailLines?: number; maxChars?: number 
 
 // === PLUGIN ===
 
-export const SchedulerPlugin: Plugin = async () => {
-  return {
-    tool: {
+const TOOLS = {
        schedule_job: tool({
            description:
             "Schedule a recurring job to run an opencode prompt. Uses launchd (Mac), systemd (Linux), Windows Task Scheduler, or cron fallback when needed.",
@@ -3340,9 +3389,47 @@ Commands:
           return okResult(format, `Logs for ${job.name}\n\n${logs}`, { job, logPath, logs })
         },
       }),
-    },
-  }
 }
 
-// Default export for OpenCode plugin system
-export default SchedulerPlugin
+// OpenCode 1: returns the tool map.
+const SchedulerPlugin: Plugin = async () => {
+  HOST_GENERATION = 1
+  return { tool: TOOLS }
+}
+
+// OpenCode 2: registers the same tools through a tool transform. Input is
+// validated with the same zod schema OpenCode 1 uses, so execute() sees
+// identical args on both hosts.
+async function setupV2(ctx: PluginV2Context): Promise<void> {
+  HOST_GENERATION = 2
+  const definitions = Object.entries(TOOLS).map(([name, definition]) => {
+    const schema = tool.schema.object(definition.args)
+    const { $schema: _ignored, ...input } = tool.schema.toJSONSchema(schema) as Record<string, unknown>
+    return { name, definition, schema, input }
+  })
+  await ctx.tool.transform((editor) => {
+    for (const { name, definition, schema, input } of definitions) {
+      editor.add({
+        name,
+        description: definition.description,
+        input,
+        execute: async (raw: unknown) => {
+          const parsed = schema.safeParse(raw ?? {})
+          if (!parsed.success) {
+            return { content: `Invalid arguments for ${name}: ${parsed.error.message}` }
+          }
+          const output = await definition.execute(parsed.data as never, undefined as never)
+          return { content: typeof output === "string" ? output : JSON.stringify(output) }
+        },
+      })
+    }
+  })
+}
+
+// One package for both hosts: OpenCode 1 (>= 1.18.29) calls server(), OpenCode 2
+// calls setup(). Only the default export, so OpenCode 1 registers it once.
+export default {
+  id: "opencode-scheduler",
+  server: SchedulerPlugin,
+  setup: setupV2,
+}
