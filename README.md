@@ -104,6 +104,11 @@ Jobs run from the working directory where you created them, picking up your `ope
 - **No overlap**: if the previous run is still active, the next scheduled tick is skipped.
 - **Non-interactive by default**: scheduled runs force `OPENCODE_PERMISSION` to deny "question" prompts, so jobs don't hang waiting for approvals.
 - **Optional timeout**: set `timeoutSeconds` to hard-stop long runs (SIGTERM, then SIGKILL).
+- **Edits survive a run**: a run records its result into the job as it is when the run ends, so `update_job` changes made during a run are kept, and a job deleted during a run stays deleted.
+
+### Deleting a Job
+
+`delete_job` unschedules the job, stops a run that is in progress (it is recorded as failed with error `stopped`), and removes the job. Its run history and log are renamed to `<slug>.deleted-<timestamp>.jsonl` / `.log` in the same folders, so a new job with the same name starts with a clean history while the old files stay on disk (`cleanup_global` with `includeHistory` removes them). On systemd it also removes the timer's last-run stamp, so a recreated job does not fire an immediate catch-up run.
 
 ### Platform Support
 
@@ -156,7 +161,7 @@ Jobs use standard 5-field cron expressions:
 | `install_skill` | Install a built-in skill into your repo |
 | `get_job` | Fetch job details and metadata |
 | `update_job` | Update an existing job |
-| `delete_job` | Remove a scheduled job |
+| `delete_job` | Remove a scheduled job (stops a run in progress, archives its history) |
 | `cleanup_global` | Remove scheduler artifacts across all scopes (dry-run by default) |
 | `run_job` | Execute a job immediately (fire-and-forget) |
 | `job_logs` | View the latest logs from a job |
