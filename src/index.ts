@@ -16,13 +16,14 @@ import { tool } from "@opencode-ai/plugin"
 import type { Plugin as PluginV2 } from "@opencode/plugin"
 
 type PluginV2Context = PluginV2.Context
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, watch, writeFileSync, unlinkSync, type FSWatcher } from "fs"
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync, unlinkSync, type FSWatcher } from "fs"
 import { basename, dirname, join, resolve as resolvePath } from "path"
 import { homedir, platform } from "os"
 import { execFileSync, execSync, spawn, type ChildProcess } from "child_process"
 import { fileURLToPath } from "url"
 import { nextCronRun, parseCronField, splitCronExpression, validateCronExpression } from "./cron"
 import { SchedulerRpc, type JobState, type JobSummary } from "./rpc"
+import { SUPERVISOR_SCRIPT } from "./supervisor"
 
 // Storage location - shared with other opencode tools
 const OPENCODE_CONFIG = join(homedir(), ".config", "opencode")
@@ -134,237 +135,26 @@ function currentScopeId(): string {
   return deriveScopeId(process.cwd())
 }
 
-const SUPERVISOR_SCRIPT = `#!/usr/bin/perl
-use strict;
-use warnings;
-use JSON::PP;
-use File::Basename qw(dirname);
-use File::Path qw(make_path);
-use POSIX qw(setsid strftime);
-use Time::HiRes qw(time);
-
-# opencode-scheduler supervisor v1
-
-sub iso_now {
-  my @t = localtime(time());
-  return strftime("%Y-%m-%dT%H:%M:%S%z", @t);
-}
-
-sub read_json {
-  my ($path) = @_;
-  open my $fh, "<", $path or die "Failed to read $path: $!\n";
-  local $/;
-  my $raw = <$fh>;
-  close $fh;
-  my $json = JSON::PP->new->utf8->relaxed;
-  return $json->decode($raw);
-}
-
-sub write_json_atomic {
-  my ($path, $data) = @_;
-  my $tmp = "$path.tmp.$$";
-  my $json = JSON::PP->new->utf8->canonical;
-  open my $fh, ">", $tmp or die "Failed to write $tmp: $!\n";
-  print $fh $json->encode($data);
-  close $fh or die "Failed to close $tmp: $!\n";
-  rename $tmp, $path or die "Failed to rename $tmp -> $path: $!\n";
-}
-
-sub append_jsonl {
-  my ($path, $data) = @_;
-  my $json = JSON::PP->new->utf8->canonical;
-  open my $fh, ">>", $path or die "Failed to append $path: $!\n";
-  print $fh $json->encode($data) . "\n";
-  close $fh;
-}
-
-sub pid_alive {
-  my ($pid) = @_;
-  return 0 if !$pid;
-  return kill 0, $pid;
-}
-
-sub random_id {
-  my $n = int(rand(1_000_000_000));
-  return sprintf("%09d", $n);
-}
-
-my $job_path = shift @ARGV;
-if (!$job_path) { die "usage: supervisor.pl <job.json>\n"; }
-
-my $job = read_json($job_path);
-my $scope_id = $job->{scopeId} || "";
-my $slug = $job->{slug} || "";
-if (!$scope_id || !$slug) { die "job missing scopeId/slug\n"; }
-
-my $home = $ENV{HOME} || "";
-if (!$home) { die "HOME is not set\n"; }
-
-my $config_root = "$home/.config/opencode";
-my $scheduler_root = "$config_root/scheduler/scopes/$scope_id";
-my $locks_dir = "$scheduler_root/locks";
-my $runs_dir = "$scheduler_root/runs";
-my $logs_dir = "$config_root/logs/scheduler/$scope_id";
-
-make_path($locks_dir);
-make_path($runs_dir);
-make_path($logs_dir);
-
-my $log_path = "$logs_dir/$slug.log";
-open STDOUT, ">>", $log_path or die "Failed to open log $log_path: $!\n";
-open STDERR, ">&STDOUT" or die "Failed to dup stderr: $!\n";
-select STDOUT; $| = 1;
-select STDERR; $| = 1;
-
-my $lock_path = "$locks_dir/$slug.json";
-if (-e $lock_path) {
-  my $lock = eval { read_json($lock_path) };
-  my $pid = ($lock && ref($lock) eq 'HASH') ? ($lock->{pid} || 0) : 0;
-  if (pid_alive($pid)) {
-    my $now = iso_now();
-    print "\n=== Scheduled run skipped (already running pid=$pid) $now ===\n";
-    exit 0;
-  }
-  unlink $lock_path;
-}
-
-my $run_id = time() . "-" . random_id();
-my $started_at = iso_now();
-my $t0 = time();
-
-write_json_atomic($lock_path, { pid => $$, startedAt => $started_at, runId => $run_id });
-
-# Update job metadata: running
-$job->{lastRunAt} = $started_at;
-$job->{lastRunSource} = "scheduled";
-$job->{lastRunStatus} = "running";
-delete $job->{lastRunExitCode};
-delete $job->{lastRunError};
-$job->{updatedAt} = $started_at;
-write_json_atomic($job_path, $job);
-
-# Force non-interactive scheduled runs
-my $perm = { question => "deny" };
-if ($ENV{OPENCODE_PERMISSION}) {
-  my $existing = eval { JSON::PP->new->decode($ENV{OPENCODE_PERMISSION}) };
-  if ($existing && ref($existing) eq 'HASH') {
-    $perm = { %$existing, %$perm };
-  }
-}
-$ENV{OPENCODE_PERMISSION} = JSON::PP->new->canonical->encode($perm);
-$ENV{OPENCODE_SCHEDULER_RUN_ID} = $run_id;
-
-print "\n=== Scheduled run $started_at runId=$run_id ===\n";
-
-my $inv = $job->{invocation};
-if (!$inv || ref($inv) ne 'HASH' || !$inv->{command} || ref($inv->{args}) ne 'ARRAY') {
-  my $now = iso_now();
-  print "\n=== Supervisor error $now: job missing invocation.command/args ===\n";
-  $job->{lastRunStatus} = "failed";
-  $job->{lastRunError} = "job missing invocation";
-  $job->{updatedAt} = $now;
-  write_json_atomic($job_path, $job);
-  unlink $lock_path;
-  exit 1;
-}
-
-my $command = $inv->{command};
-my @args = @{ $inv->{args} };
-
-my $workdir = $job->{workdir} || $home;
-
-my $timeout = $job->{timeoutSeconds};
-$timeout = undef if defined($timeout) && $timeout !~ /^\\d+$/;
-
-my $timed_out = 0;
-my $child_pid = fork();
-if (!defined $child_pid) {
-  my $now = iso_now();
-  print "\n=== Supervisor error $now: fork failed: $! ===\n";
-  $job->{lastRunStatus} = "failed";
-  $job->{lastRunError} = "fork failed";
-  $job->{updatedAt} = $now;
-  write_json_atomic($job_path, $job);
-  unlink $lock_path;
-  exit 1;
-}
-
-if ($child_pid == 0) {
-  chdir $workdir or die "Failed to chdir to $workdir: $!\n";
-  # OpenCode 2 \`run\` resolves its directory from PWD before cwd.
-  $ENV{PWD} = $workdir;
-  eval { setsid(); };
-  exec { $command } $command, @args;
-  die "Failed to exec $command: $!\n";
-}
-
-if (defined($timeout) && $timeout > 0) {
-  local $SIG{ALRM} = sub {
-    $timed_out = 1;
-    my $now = iso_now();
-    print "\n=== Timeout after $timeout seconds $now; sending SIGTERM ===\n";
-    kill 'TERM', -$child_pid;
-    sleep 5;
-    print "\n=== Forcing SIGKILL $now ===\n";
-    kill 'KILL', -$child_pid;
-  };
-  alarm($timeout);
-}
-
-my $waited = waitpid($child_pid, 0);
-my $status = $?;
-alarm(0);
-
-my $finished_at = iso_now();
-my $duration_ms = int((time() - $t0) * 1000);
-my $exit_code = ($status >> 8);
-if ($timed_out) {
-  $exit_code = 124;
-}
-
-my $final_status = "failed";
-my $final_error = undef;
-if ($timed_out) {
-  $final_status = "failed";
-  $final_error = "timeout";
-} elsif ($waited != $child_pid) {
-  $final_status = "failed";
-  $final_error = "waitpid failed";
-} elsif ($status == 0) {
-  $final_status = "success";
-} else {
-  $final_status = "failed";
-  $final_error = "exit code $exit_code";
-}
-
-$job->{lastRunStatus} = $final_status;
-$job->{lastRunExitCode} = $exit_code;
-$job->{lastRunError} = $final_error if defined $final_error;
-$job->{updatedAt} = $finished_at;
-write_json_atomic($job_path, $job);
-
-append_jsonl("$runs_dir/$slug.jsonl", {
-  runId => $run_id,
-  scopeId => $scope_id,
-  slug => $slug,
-  startedAt => $started_at,
-  finishedAt => $finished_at,
-  durationMs => $duration_ms,
-  status => $final_status,
-  exitCode => $exit_code,
-  error => $final_error,
-  pid => $child_pid,
-  logPath => $log_path,
-});
-
-unlink $lock_path;
-print "\n=== Finished $finished_at status=$final_status exitCode=$exit_code durationMs=$duration_ms ===\n";
-exit($exit_code);
-`
-
 function ensureSupervisorScript(): void {
   ensureDir(SCHEDULER_DIR)
-  writeFileSync(SUPERVISOR_PATH, SUPERVISOR_SCRIPT)
+  try {
+    if (readFileSync(SUPERVISOR_PATH, "utf-8") === SUPERVISOR_SCRIPT) return
+  } catch {}
+  // Atomic, so a timer firing mid-write never runs a partial script.
+  const tmp = `${SUPERVISOR_PATH}.tmp.${process.pid}`
+  writeFileSync(tmp, SUPERVISOR_SCRIPT)
+  renameSync(tmp, SUPERVISOR_PATH)
+}
+
+// Installed jobs run whatever supervisor.pl is on disk, so bring it up to date
+// when the plugin loads rather than waiting for the next schedule_job.
+function refreshSupervisorScript(): void {
+  if (!existsSync(SUPERVISOR_PATH)) return
+  try {
+    ensureSupervisorScript()
+  } catch (error) {
+    console.error("[opencode-scheduler] cannot update supervisor.pl:", error)
+  }
 }
 
 // Job type
@@ -1147,6 +937,13 @@ function installSystemdJob(job: Job): void {
   const servicePath = join(SYSTEMD_USER_DIR, `opencode-job-${scopeId}-${job.slug}.service`)
   const timerPath = join(SYSTEMD_USER_DIR, `opencode-job-${scopeId}-${job.slug}.timer`)
 
+  // A new job must not inherit the last-run stamp of a deleted job with the
+  // same name (older versions left it behind): Persistent=true would treat
+  // the slots since then as missed and run immediately.
+  if (!existsSync(timerPath)) {
+    removeSystemdTimerStamp(`opencode-job-${scopeId}-${job.slug}.timer`)
+  }
+
   // Also stop/disable legacy units (pre-scope)
   try {
     execSync(`systemctl --user stop opencode-job-${job.slug}.timer`, { stdio: "ignore" })
@@ -1163,6 +960,18 @@ function installSystemdJob(job: Job): void {
   execSync(`systemctl --user start opencode-job-${scopeId}-${job.slug}.timer`)
 }
 
+// Persistent=true timers keep their last trigger time here. It outlives the
+// unit files, so it has to be removed explicitly.
+function removeSystemdTimerStamp(timerUnit: string): void {
+  try {
+    execSync(`systemctl --user clean --what=state ${timerUnit}`, { stdio: "ignore" })
+  } catch {}
+  const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share")
+  try {
+    rmSync(join(dataHome, "systemd", "timers", `stamp-${timerUnit}`), { force: true })
+  } catch {}
+}
+
 function uninstallSystemdJob(job: Job): void {
   const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir())
 
@@ -1170,10 +979,12 @@ function uninstallSystemdJob(job: Job): void {
   const legacyTimerUnit = `opencode-job-${job.slug}.timer`
 
   for (const timerUnit of [scopedTimerUnit, legacyTimerUnit]) {
-    try {
-      execSync(`systemctl --user stop ${timerUnit}`, { stdio: "ignore" })
-      execSync(`systemctl --user disable ${timerUnit}`, { stdio: "ignore" })
-    } catch {}
+    for (const action of ["stop", "disable"]) {
+      try {
+        execSync(`systemctl --user ${action} ${timerUnit}`, { stdio: "ignore" })
+      } catch {}
+    }
+    removeSystemdTimerStamp(timerUnit)
   }
 
   const scopedServicePath = join(SYSTEMD_USER_DIR, `opencode-job-${scopeId}-${job.slug}.service`)
@@ -1533,7 +1344,10 @@ function saveJob(job: Job): void {
   const normalizedJob: Job = { ...job, scopeId }
   ensureScopeStorage(scopeId)
   const path = jobFilePath(scopeId, normalizedJob.slug)
-  writeFileSync(path, JSON.stringify(sanitizeJob(normalizedJob), null, 2))
+  // Atomic: supervisor.pl reads the file while a run is in progress.
+  const tmp = `${path}.tmp.${process.pid}`
+  writeFileSync(tmp, JSON.stringify(sanitizeJob(normalizedJob), null, 2))
+  renameSync(tmp, path)
 }
 
 function deleteJobFile(job: Job): void {
@@ -1542,6 +1356,129 @@ function deleteJobFile(job: Job): void {
   if (existsSync(path)) {
     unlinkSync(path)
   }
+}
+
+// Moves a deleted job's run history and log aside, so a new job with the same
+// name starts clean while the old files stay on disk. Slugs contain no dots,
+// so archived names never collide with a live job's files.
+function archiveJobHistory(job: Job, now = new Date()): string[] {
+  const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir())
+  const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")
+  const archived: string[] = []
+  for (const [path, ext] of [
+    [join(scopeRunsDir(scopeId), `${job.slug}.jsonl`), "jsonl"],
+    [scopedLogPath(scopeId, job.slug), "log"],
+  ]) {
+    if (!existsSync(path)) continue
+    const target = join(dirname(path), `${job.slug}.deleted-${stamp}.${ext}`)
+    try {
+      renameSync(path, target)
+      archived.push(target)
+    } catch {}
+  }
+  return archived
+}
+
+// Manual runs (run_job) are children of this process and hold no lock file.
+const manualRuns = new Map<string, ChildProcess>()
+
+function runKey(scopeId: string, slug: string): string {
+  return `${scopeId}/${slug}`
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function signal(pid: unknown, sig: NodeJS.Signals): void {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid === 0) return
+  try {
+    process.kill(pid, sig)
+  } catch {}
+}
+
+// SIGTERM, then SIGKILL if the process is still alive after the grace period.
+async function terminate(options: {
+  term: () => void
+  kill: () => void
+  exited: () => boolean
+  graceMs: number
+}): Promise<void> {
+  options.term()
+  const deadline = Date.now() + options.graceMs
+  while (Date.now() < deadline) {
+    if (options.exited()) return
+    await sleep(100)
+  }
+  options.kill()
+  const killDeadline = Date.now() + 2_000
+  while (Date.now() < killDeadline && !options.exited()) await sleep(100)
+}
+
+function readLockFile(path: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8"))
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+// Stops a run of this job that is in progress, scheduled or manual, and
+// returns a description of each run stopped. The runs record their result
+// before returning, while the job file still exists.
+async function stopJobRuns(job: Job): Promise<string[]> {
+  const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir())
+  const stopped: string[] = []
+
+  const manual = manualRuns.get(runKey(scopeId, job.slug))
+  if (manual && manual.exitCode === null && manual.signalCode === null) {
+    await terminate({
+      term: () => manual.kill("SIGTERM"),
+      kill: () => manual.kill("SIGKILL"),
+      exited: () => manual.exitCode !== null || manual.signalCode !== null,
+      graceMs: 10_000,
+    })
+    stopped.push(`manual run (pid ${manual.pid})`)
+  }
+
+  const lockPath = join(scopeLocksDir(scopeId), `${job.slug}.json`)
+  const lock = readLockFile(lockPath)
+  const running = lock !== null && isPidAlive(lock.pid)
+  const services = IS_LINUX
+    ? [`opencode-job-${scopeId}-${job.slug}.service`, `opencode-job-${job.slug}.service`]
+    : []
+  // Also cancels a start the timer queued just before it was stopped, which
+  // the lock check below could miss. The unit stays loaded while it runs, so
+  // this works after its file is gone.
+  for (const service of services) {
+    try {
+      execSync(`systemctl --user stop ${service}`, { stdio: "ignore", timeout: 30_000 })
+    } catch {}
+  }
+  if (lock && running) {
+    // supervisor.pl passes SIGTERM on to the run's process group and waits up
+    // to 5s before killing it, so 10s covers a clean stop.
+    await terminate({
+      term: () => signal(lock.pid, "SIGTERM"),
+      kill: () => {
+        if (typeof lock.childPid === "number") signal(-lock.childPid, "SIGKILL")
+        signal(lock.pid, "SIGKILL")
+      },
+      exited: () => !isPidAlive(lock.pid),
+      graceMs: 10_000,
+    })
+    stopped.push(`scheduled run (pid ${lock.pid})`)
+  }
+  rmSync(lockPath, { force: true })
+  // A stopped run leaves its service in the failed list; the unit is gone.
+  for (const service of services) {
+    try {
+      execSync(`systemctl --user reset-failed ${service}`, { stdio: "ignore" })
+    } catch {}
+  }
+
+  return stopped
 }
 
 interface GlobalCleanupPlan {
@@ -2095,9 +2032,12 @@ function findJobByName(
   return job
 }
 
-function updateJobRecord(job: Job, updates: Partial<Job>): Job {
+// Returns null without writing when the job has been deleted, so a run that
+// finishes afterwards cannot bring it back.
+function updateJobRecord(job: Job, updates: Partial<Job>): Job | null {
   const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir())
-  const latest = loadScopedJob(scopeId, job.slug) || job
+  const latest = loadScopedJob(scopeId, job.slug)
+  if (!latest) return null
   const updated: Job = {
     ...latest,
     ...updates,
@@ -2330,10 +2270,19 @@ function runJobNow(job: Job): { startedAt: string; logPath: string; pid?: number
     lastRunError: undefined,
   })
 
-  if (child.stdout) child.stdout.pipe(logStream)
-  if (child.stderr) child.stderr.pipe(logStream)
+  // The close handler ends the log, after both streams and the result line.
+  if (child.stdout) child.stdout.pipe(logStream, { end: false })
+  if (child.stderr) child.stderr.pipe(logStream, { end: false })
+
+  const key = runKey(job.scopeId || deriveScopeId(job.workdir || homedir()), job.slug)
+  manualRuns.set(key, child)
+  const forget = () => {
+    if (manualRuns.get(key) === child) manualRuns.delete(key)
+  }
+  child.on("exit", forget)
 
   child.on("error", (error) => {
+    forget()
     logStream.write(`\n=== Run error ${new Date().toISOString()} ===\n${error.message}\n`)
     logStream.end()
     updateJobRecord(job, {
@@ -3181,7 +3130,8 @@ Commands:
       }),
 
       delete_job: tool({
-        description: "Delete a scheduled job",
+        description:
+          "Delete a scheduled job. Stops a run that is in progress, and moves the job's run history and log aside so a new job with the same name starts clean.",
         args: {
           name: tool.schema.string().describe("The job name or slug to delete"),
           scopeRoot: tool.schema
@@ -3198,7 +3148,10 @@ Commands:
             return errorResult(format, `Job "${args.name}" not found.`)
           }
 
+          // Unschedule first so no new run starts, then stop the current one;
+          // it records its result before the job file goes away.
           uninstallJob(job)
+          const stoppedRuns = await stopJobRuns(job)
           deleteJobFile(job)
 
           // Best-effort: remove legacy job file if present.
@@ -3209,7 +3162,12 @@ Commands:
             } catch {}
           }
 
-          return okResult(format, `Deleted job "${job.name}"`, { job })
+          const archived = archiveJobHistory(job)
+
+          const lines = [`Deleted job "${job.name}"`]
+          if (stoppedRuns.length > 0) lines.push(`Stopped: ${stoppedRuns.join(", ")}`)
+          if (archived.length > 0) lines.push(`Archived history:\n${archived.map((path) => `- ${path}`).join("\n")}`)
+          return okResult(format, lines.join("\n"), { job, stoppedRuns, archived })
         },
       }),
 
@@ -3397,6 +3355,7 @@ Commands:
 // OpenCode 1: returns the tool map.
 const SchedulerPlugin: Plugin = async () => {
   HOST_GENERATION = 1
+  refreshSupervisorScript()
   return { tool: TOOLS }
 }
 
@@ -3405,6 +3364,7 @@ const SchedulerPlugin: Plugin = async () => {
 // identical args on both hosts.
 async function setupV2(ctx: PluginV2Context): Promise<() => Promise<void>> {
   HOST_GENERATION = 2
+  refreshSupervisorScript()
   const definitions = Object.entries(TOOLS).map(([name, definition]) => {
     const schema = tool.schema.object(definition.args)
     const { $schema: _ignored, ...input } = tool.schema.toJSONSchema(schema) as Record<string, unknown>
