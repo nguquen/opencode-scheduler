@@ -16,11 +16,13 @@ import { tool } from "@opencode-ai/plugin"
 import type { Plugin as PluginV2 } from "@opencode/plugin"
 
 type PluginV2Context = PluginV2.Context
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs"
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, watch, writeFileSync, unlinkSync, type FSWatcher } from "fs"
 import { basename, dirname, join, resolve as resolvePath } from "path"
 import { homedir, platform } from "os"
 import { execFileSync, execSync, spawn, type ChildProcess } from "child_process"
 import { fileURLToPath } from "url"
+import { nextCronRun, parseCronField, splitCronExpression, validateCronExpression } from "./cron"
+import { SchedulerRpc, type JobState, type JobSummary } from "./rpc"
 
 // Storage location - shared with other opencode tools
 const OPENCODE_CONFIG = join(homedir(), ".config", "opencode")
@@ -680,79 +682,6 @@ function getEnhancedPath(): string {
     "/sbin",
   ]
   return paths.join(":")
-}
-
-function splitCronExpression(cron: string): [string, string, string, string, string] {
-  const parts = cron.trim().split(/\s+/)
-  if (parts.length !== 5) {
-    throw new Error(`Invalid cron: ${cron}`)
-  }
-  return parts as [string, string, string, string, string]
-}
-
-function uniqueSorted(values: number[]): number[] {
-  return Array.from(new Set(values)).sort((a, b) => a - b)
-}
-
-function parseCronField(
-  field: string,
-  min: number,
-  max: number,
-  label: string,
-  allowSundaySeven = false
-): number[] | null {
-  if (field === "*") return null
-
-  if (field.startsWith("*/")) {
-    const step = parseInt(field.slice(2), 10)
-    if (!Number.isFinite(step) || step <= 0) {
-      throw new Error(`Invalid cron ${label} step: ${field}`)
-    }
-    const values: number[] = []
-    for (let value = min; value <= max; value += step) {
-      values.push(value)
-    }
-    return values
-  }
-
-  const parts = field.split(",")
-  if (parts.length > 1) {
-    const values = parts.map((part) => parseCronNumber(part, min, max, label, allowSundaySeven))
-    return uniqueSorted(values)
-  }
-
-  if (/^\d+$/.test(field)) {
-    return [parseCronNumber(field, min, max, label, allowSundaySeven)]
-  }
-
-  throw new Error(`Invalid cron ${label} field: ${field}`)
-}
-
-function parseCronNumber(
-  value: string,
-  min: number,
-  max: number,
-  label: string,
-  allowSundaySeven: boolean
-): number {
-  const parsed = parseInt(value, 10)
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`Invalid cron ${label} value: ${value}`)
-  }
-  const normalized = allowSundaySeven && parsed === 7 ? 0 : parsed
-  if (normalized < min || normalized > max) {
-    throw new Error(`Invalid cron ${label} value: ${value}`)
-  }
-  return normalized
-}
-
-function validateCronExpression(cron: string): void {
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = splitCronExpression(cron)
-  parseCronField(minute, 0, 59, "minute")
-  parseCronField(hour, 0, 23, "hour")
-  parseCronField(dayOfMonth, 1, 31, "day of month")
-  parseCronField(month, 1, 12, "month")
-  parseCronField(dayOfWeek, 0, 7, "day of week", true)
 }
 
 function expandLaunchdEntries(
@@ -2466,6 +2395,80 @@ function describeCron(cron: string): string {
   return cron
 }
 
+function isPidAlive(pid: unknown): boolean {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM: the process exists but belongs to another user.
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+function hasLiveLock(scopeId: string, slug: string): boolean {
+  try {
+    const lock = JSON.parse(readFileSync(join(scopeLocksDir(scopeId), `${slug}.json`), "utf-8"))
+    return isPidAlive(isRecord(lock) ? lock.pid : undefined)
+  } catch {
+    return false
+  }
+}
+
+// Scheduled runs hold a pid lock (see supervisor.pl), so "running" without a
+// live lock means the supervisor died mid-run. Manual runs are children of an
+// OpenCode process and leave no lock; their status is taken as written.
+function jobState(job: Job, liveLock: boolean): JobState {
+  if (liveLock) return "running"
+  switch (job.lastRunStatus) {
+    case "running":
+      return job.lastRunSource === "manual" ? "running" : "stale"
+    case "success":
+    case "failed":
+      return job.lastRunStatus
+    default:
+      return job.lastRunAt ? "stale" : "never"
+  }
+}
+
+function summarizeJob(job: Job, scopeId: string, now: Date): JobSummary {
+  let nextRunAt: string | undefined
+  try {
+    nextRunAt = nextCronRun(job.schedule, now)?.toISOString()
+  } catch {
+    nextRunAt = undefined
+  }
+  // RPC output is validated before serialization, so optional fields must be
+  // absent rather than undefined.
+  const summary: JobSummary = {
+    slug: job.slug,
+    name: job.name,
+    schedule: job.schedule,
+    scheduleText: describeCron(job.schedule),
+    state: jobState(job, hasLiveLock(scopeId, job.slug)),
+  }
+  if (nextRunAt) summary.nextRunAt = nextRunAt
+  if (job.lastRunAt) summary.lastRunAt = job.lastRunAt
+  if (job.lastRunSource) summary.lastRunSource = job.lastRunSource
+  if (typeof job.lastRunExitCode === "number") summary.lastRunExitCode = job.lastRunExitCode
+  if (job.lastRunError) summary.lastRunError = job.lastRunError
+  return summary
+}
+
+function listJobSummaries(scopeIds: string[], now = new Date()): JobSummary[] {
+  const summaries: JobSummary[] = []
+  const seen = new Set<string>()
+  for (const scopeId of scopeIds) {
+    for (const job of loadAllScopedJobs(scopeId)) {
+      const key = `${scopeId}/${job.slug}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      summaries.push(summarizeJob(job, scopeId, now))
+    }
+  }
+  return summaries.sort((a, b) => a.name.localeCompare(b.name))
+}
+
 function formatJobDetails(job: Job): string {
   const lines = [
     `Job: ${job.name}`,
@@ -3400,7 +3403,7 @@ const SchedulerPlugin: Plugin = async () => {
 // OpenCode 2: registers the same tools through a tool transform. Input is
 // validated with the same zod schema OpenCode 1 uses, so execute() sees
 // identical args on both hosts.
-async function setupV2(ctx: PluginV2Context): Promise<void> {
+async function setupV2(ctx: PluginV2Context): Promise<() => Promise<void>> {
   HOST_GENERATION = 2
   const definitions = Object.entries(TOOLS).map(([name, definition]) => {
     const schema = tool.schema.object(definition.args)
@@ -3424,6 +3427,63 @@ async function setupV2(ctx: PluginV2Context): Promise<void> {
       })
     }
   })
+  return startJobFeed(ctx)
+}
+
+// Serves the TUI sidebar (src/tui.tsx): `list` returns this location's jobs,
+// and `changed` fires when a job file or run lock in its scopes changes,
+// including runs the OS scheduler starts outside OpenCode.
+async function startJobFeed(ctx: PluginV2Context): Promise<() => Promise<void>> {
+  const scopeIds = uniqueStrings(
+    [ctx.location.directory, ctx.location.project.directory].map((dir) => deriveScopeId(normalizeWorkdirPath(dir)))
+  )
+
+  let registration: Awaited<ReturnType<typeof ctx.rpc.register<typeof SchedulerRpc>>>
+  try {
+    registration = await ctx.rpc.register(SchedulerRpc, {
+      list: async () => ({ scopeIds, jobs: listJobSummaries(scopeIds) }),
+    })
+  } catch (error) {
+    console.error("[opencode-scheduler] sidebar RPC unavailable:", error)
+    return async () => {}
+  }
+
+  const timers = new Map<string, ReturnType<typeof setTimeout>>()
+  const notify = (scopeId: string) => {
+    clearTimeout(timers.get(scopeId))
+    timers.set(
+      scopeId,
+      setTimeout(() => {
+        timers.delete(scopeId)
+        registration.events.emit("changed", { scopeId }).catch(() => {})
+      }, 250)
+    )
+  }
+
+  const watchers: FSWatcher[] = []
+  for (const scopeId of scopeIds) {
+    ensureScopeStorage(scopeId)
+    for (const dir of [scopeJobsDir(scopeId), scopeLocksDir(scopeId)]) {
+      try {
+        const watcher = watch(dir, () => notify(scopeId))
+        watcher.on("error", () => watcher.close())
+        watchers.push(watcher)
+      } catch (error) {
+        console.error(`[opencode-scheduler] cannot watch ${dir}:`, error)
+      }
+    }
+  }
+
+  return async () => {
+    for (const watcher of watchers) watcher.close()
+    for (const timer of timers.values()) clearTimeout(timer)
+    timers.clear()
+    await registration.dispose()
+  }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values))
 }
 
 // One package for both hosts: OpenCode 1 (>= 1.18.29) calls server(), OpenCode 2

@@ -40,6 +40,17 @@ Jobs store the invocation built for the host that created them, so keep OpenCode
 OpenCode 2 job storage (`~/.config/opencode/scheduler`) and scheduler units apart if
 both run on one machine.
 
+### Sidebar (OpenCode 2)
+
+On OpenCode 2 the session sidebar lists the jobs of the session's project: status
+(`●` running, `✓` succeeded, `✗` failed, `!` interrupted, `○` never run), next run and
+last run. It updates when a job file or run lock changes, including runs the OS
+scheduler starts, and refreshes every 30 seconds. The section is hidden when the
+project has no jobs. It is read-only; manage jobs through the tools.
+
+The TUI reads jobs from the server plugin over RPC, so it also works when attached to
+a remote OpenCode service.
+
 ## Examples
 
 **Daily deal hunting:**

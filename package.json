@@ -7,6 +7,8 @@
   "type": "module",
   "files": [
     "dist",
+    "src/tui.tsx",
+    "src/rpc.ts",
     "README.md",
     "LICENSE"
   ],
@@ -14,6 +16,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./src/tui.tsx"
     }
   },
   "scripts": {
@@ -23,7 +29,8 @@
     "release:patch": "npm version patch && npm publish",
     "release:minor": "npm version minor && npm publish",
     "release:major": "npm version major && npm publish",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "keywords": [
     "opencode",
@@ -50,18 +57,34 @@
   },
   "devDependencies": {
     "@opencode/plugin": "^2.0.21",
+    "@opencode/theme": "^2.0.21",
+    "@opentui/core": "^0.5.14",
+    "@opentui/solid": "^0.5.14",
     "bun-types": "latest",
+    "solid-js": "^1.9.12",
     "typescript": "^5.7.3"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.0.0",
-    "@opencode/plugin": ">=2.0.18 <3"
+    "@opencode/plugin": ">=2.0.18 <3",
+    "@opentui/core": ">=0.5.14",
+    "@opentui/solid": ">=0.5.14",
+    "solid-js": ">=1.9.0"
   },
   "peerDependenciesMeta": {
     "@opencode-ai/plugin": {
       "optional": true
     },
     "@opencode/plugin": {
+      "optional": true
+    },
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
       "optional": true
     }
   }

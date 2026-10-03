@@ -12335,11 +12335,159 @@ function tool(input) {
 }
 tool.schema = exports_external;
 // src/index.ts
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, watch, writeFileSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve as resolvePath } from "path";
 import { homedir, platform } from "os";
 import { execFileSync, execSync, spawn } from "child_process";
 import { fileURLToPath } from "url";
+
+// src/cron.ts
+function splitCronExpression(cron) {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) {
+    throw new Error(`Invalid cron: ${cron}`);
+  }
+  return parts;
+}
+function uniqueSorted(values) {
+  return Array.from(new Set(values)).sort((a, b) => a - b);
+}
+function parseCronField(field, min, max, label, allowSundaySeven = false) {
+  if (field === "*")
+    return null;
+  if (field.startsWith("*/")) {
+    const step = parseInt(field.slice(2), 10);
+    if (!Number.isFinite(step) || step <= 0) {
+      throw new Error(`Invalid cron ${label} step: ${field}`);
+    }
+    const values = [];
+    for (let value = min;value <= max; value += step) {
+      values.push(value);
+    }
+    return values;
+  }
+  const parts = field.split(",");
+  if (parts.length > 1) {
+    const values = parts.map((part) => parseCronNumber(part, min, max, label, allowSundaySeven));
+    return uniqueSorted(values);
+  }
+  if (/^\d+$/.test(field)) {
+    return [parseCronNumber(field, min, max, label, allowSundaySeven)];
+  }
+  throw new Error(`Invalid cron ${label} field: ${field}`);
+}
+function parseCronNumber(value, min, max, label, allowSundaySeven) {
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid cron ${label} value: ${value}`);
+  }
+  const normalized = allowSundaySeven && parsed === 7 ? 0 : parsed;
+  if (normalized < min || normalized > max) {
+    throw new Error(`Invalid cron ${label} value: ${value}`);
+  }
+  return normalized;
+}
+function validateCronExpression(cron) {
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = splitCronExpression(cron);
+  parseCronField(minute, 0, 59, "minute");
+  parseCronField(hour, 0, 23, "hour");
+  parseCronField(dayOfMonth, 1, 31, "day of month");
+  parseCronField(month, 1, 12, "month");
+  parseCronField(dayOfWeek, 0, 7, "day of week", true);
+}
+function nextCronRun(cron, from = new Date) {
+  const [minuteField, hourField, domField, monthField, dowField] = splitCronExpression(cron);
+  const minutes = parseCronField(minuteField, 0, 59, "minute");
+  const hours = parseCronField(hourField, 0, 23, "hour");
+  const doms = parseCronField(domField, 1, 31, "day of month");
+  const months = parseCronField(monthField, 1, 12, "month");
+  const dows = parseCronField(dowField, 0, 7, "day of week", true);
+  const domStar = domField.startsWith("*");
+  const dowStar = dowField.startsWith("*");
+  const has = (values, value) => values === null || values.includes(value);
+  const dayMatches = (date5) => {
+    const domOk = has(doms, date5.getDate());
+    const dowOk = has(dows, date5.getDay());
+    if (domStar || dowStar)
+      return domOk && dowOk;
+    return domOk || dowOk;
+  };
+  const t = new Date(from.getTime());
+  t.setSeconds(0, 0);
+  t.setMinutes(t.getMinutes() + 1);
+  const limit = from.getTime() + 5 * 366 * 24 * 60 * 60 * 1000;
+  while (t.getTime() <= limit) {
+    if (!has(months, t.getMonth() + 1)) {
+      t.setMonth(t.getMonth() + 1, 1);
+      t.setHours(0, 0, 0, 0);
+      continue;
+    }
+    if (!dayMatches(t)) {
+      t.setDate(t.getDate() + 1);
+      t.setHours(0, 0, 0, 0);
+      continue;
+    }
+    if (!has(hours, t.getHours())) {
+      t.setHours(t.getHours() + 1, 0, 0, 0);
+      continue;
+    }
+    if (!has(minutes, t.getMinutes())) {
+      t.setMinutes(t.getMinutes() + 1, 0, 0);
+      continue;
+    }
+    return t;
+  }
+  return;
+}
+
+// src/rpc.ts
+var emptyObject = { type: "object", properties: {}, additionalProperties: false };
+var SchedulerRpc = {
+  id: "opencode-scheduler",
+  methods: {
+    list: {
+      input: emptyObject,
+      output: {
+        type: "object",
+        properties: {
+          scopeIds: { type: "array", items: { type: "string" } },
+          jobs: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                slug: { type: "string" },
+                name: { type: "string" },
+                schedule: { type: "string" },
+                scheduleText: { type: "string" },
+                state: { type: "string", enum: ["running", "success", "failed", "stale", "never"] },
+                nextRunAt: { type: "string" },
+                lastRunAt: { type: "string" },
+                lastRunSource: { type: "string", enum: ["manual", "scheduled"] },
+                lastRunExitCode: { type: "number" },
+                lastRunError: { type: "string" }
+              },
+              required: ["slug", "name", "schedule", "scheduleText", "state"]
+            }
+          }
+        },
+        required: ["scopeIds", "jobs"]
+      }
+    }
+  },
+  events: {
+    changed: {
+      schema: {
+        type: "object",
+        properties: { scopeId: { type: "string" } },
+        required: ["scopeId"],
+        additionalProperties: false
+      }
+    }
+  }
+};
+
+// src/index.ts
 var OPENCODE_CONFIG = join(homedir(), ".config", "opencode");
 var LEGACY_JOBS_DIR = join(OPENCODE_CONFIG, "jobs");
 var LOGS_DIR = join(OPENCODE_CONFIG, "logs");
@@ -12867,59 +13015,6 @@ function getEnhancedPath() {
     "/sbin"
   ];
   return paths.join(":");
-}
-function splitCronExpression(cron) {
-  const parts = cron.trim().split(/\s+/);
-  if (parts.length !== 5) {
-    throw new Error(`Invalid cron: ${cron}`);
-  }
-  return parts;
-}
-function uniqueSorted(values) {
-  return Array.from(new Set(values)).sort((a, b) => a - b);
-}
-function parseCronField(field, min, max, label, allowSundaySeven = false) {
-  if (field === "*")
-    return null;
-  if (field.startsWith("*/")) {
-    const step = parseInt(field.slice(2), 10);
-    if (!Number.isFinite(step) || step <= 0) {
-      throw new Error(`Invalid cron ${label} step: ${field}`);
-    }
-    const values = [];
-    for (let value = min;value <= max; value += step) {
-      values.push(value);
-    }
-    return values;
-  }
-  const parts = field.split(",");
-  if (parts.length > 1) {
-    const values = parts.map((part) => parseCronNumber(part, min, max, label, allowSundaySeven));
-    return uniqueSorted(values);
-  }
-  if (/^\d+$/.test(field)) {
-    return [parseCronNumber(field, min, max, label, allowSundaySeven)];
-  }
-  throw new Error(`Invalid cron ${label} field: ${field}`);
-}
-function parseCronNumber(value, min, max, label, allowSundaySeven) {
-  const parsed = parseInt(value, 10);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`Invalid cron ${label} value: ${value}`);
-  }
-  const normalized = allowSundaySeven && parsed === 7 ? 0 : parsed;
-  if (normalized < min || normalized > max) {
-    throw new Error(`Invalid cron ${label} value: ${value}`);
-  }
-  return normalized;
-}
-function validateCronExpression(cron) {
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = splitCronExpression(cron);
-  parseCronField(minute, 0, 59, "minute");
-  parseCronField(hour, 0, 23, "hour");
-  parseCronField(dayOfMonth, 1, 31, "day of month");
-  parseCronField(month, 1, 12, "month");
-  parseCronField(dayOfWeek, 0, 7, "day of week", true);
 }
 function expandLaunchdEntries(entries, key, values) {
   if (!values)
@@ -14300,6 +14395,77 @@ function describeCron(cron) {
   }
   return cron;
 }
+function isPidAlive(pid) {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0)
+    return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error45) {
+    return error45.code === "EPERM";
+  }
+}
+function hasLiveLock(scopeId, slug) {
+  try {
+    const lock = JSON.parse(readFileSync(join(scopeLocksDir(scopeId), `${slug}.json`), "utf-8"));
+    return isPidAlive(isRecord(lock) ? lock.pid : undefined);
+  } catch {
+    return false;
+  }
+}
+function jobState(job, liveLock) {
+  if (liveLock)
+    return "running";
+  switch (job.lastRunStatus) {
+    case "running":
+      return job.lastRunSource === "manual" ? "running" : "stale";
+    case "success":
+    case "failed":
+      return job.lastRunStatus;
+    default:
+      return job.lastRunAt ? "stale" : "never";
+  }
+}
+function summarizeJob(job, scopeId, now) {
+  let nextRunAt;
+  try {
+    nextRunAt = nextCronRun(job.schedule, now)?.toISOString();
+  } catch {
+    nextRunAt = undefined;
+  }
+  const summary = {
+    slug: job.slug,
+    name: job.name,
+    schedule: job.schedule,
+    scheduleText: describeCron(job.schedule),
+    state: jobState(job, hasLiveLock(scopeId, job.slug))
+  };
+  if (nextRunAt)
+    summary.nextRunAt = nextRunAt;
+  if (job.lastRunAt)
+    summary.lastRunAt = job.lastRunAt;
+  if (job.lastRunSource)
+    summary.lastRunSource = job.lastRunSource;
+  if (typeof job.lastRunExitCode === "number")
+    summary.lastRunExitCode = job.lastRunExitCode;
+  if (job.lastRunError)
+    summary.lastRunError = job.lastRunError;
+  return summary;
+}
+function listJobSummaries(scopeIds, now = new Date) {
+  const summaries = [];
+  const seen = new Set;
+  for (const scopeId of scopeIds) {
+    for (const job of loadAllScopedJobs(scopeId)) {
+      const key = `${scopeId}/${job.slug}`;
+      if (seen.has(key))
+        continue;
+      seen.add(key);
+      summaries.push(summarizeJob(job, scopeId, now));
+    }
+  }
+  return summaries.sort((a, b) => a.name.localeCompare(b.name));
+}
 function formatJobDetails(job) {
   const lines = [
     `Job: ${job.name}`,
@@ -15053,6 +15219,51 @@ async function setupV2(ctx) {
       });
     }
   });
+  return startJobFeed(ctx);
+}
+async function startJobFeed(ctx) {
+  const scopeIds = uniqueStrings([ctx.location.directory, ctx.location.project.directory].map((dir) => deriveScopeId(normalizeWorkdirPath(dir))));
+  let registration;
+  try {
+    registration = await ctx.rpc.register(SchedulerRpc, {
+      list: async () => ({ scopeIds, jobs: listJobSummaries(scopeIds) })
+    });
+  } catch (error45) {
+    console.error("[opencode-scheduler] sidebar RPC unavailable:", error45);
+    return async () => {};
+  }
+  const timers = new Map;
+  const notify = (scopeId) => {
+    clearTimeout(timers.get(scopeId));
+    timers.set(scopeId, setTimeout(() => {
+      timers.delete(scopeId);
+      registration.events.emit("changed", { scopeId }).catch(() => {});
+    }, 250));
+  };
+  const watchers = [];
+  for (const scopeId of scopeIds) {
+    ensureScopeStorage(scopeId);
+    for (const dir of [scopeJobsDir(scopeId), scopeLocksDir(scopeId)]) {
+      try {
+        const watcher = watch(dir, () => notify(scopeId));
+        watcher.on("error", () => watcher.close());
+        watchers.push(watcher);
+      } catch (error45) {
+        console.error(`[opencode-scheduler] cannot watch ${dir}:`, error45);
+      }
+    }
+  }
+  return async () => {
+    for (const watcher of watchers)
+      watcher.close();
+    for (const timer of timers.values())
+      clearTimeout(timer);
+    timers.clear();
+    await registration.dispose();
+  };
+}
+function uniqueStrings(values) {
+  return Array.from(new Set(values));
 }
 var src_default = {
   id: "opencode-scheduler",

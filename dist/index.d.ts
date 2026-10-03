@@ -14,7 +14,7 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import type { Plugin as PluginV2 } from "@opencode/plugin";
 type PluginV2Context = PluginV2.Context;
-declare function setupV2(ctx: PluginV2Context): Promise<void>;
+declare function setupV2(ctx: PluginV2Context): Promise<() => Promise<void>>;
 declare const _default: {
     id: string;
     server: Plugin;
