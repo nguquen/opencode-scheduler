@@ -2,7 +2,11 @@
 // OpenCode 2 TUI plugin: lists the session's project jobs in the sidebar.
 // Job data comes from the server plugin over SchedulerRpc, so this also works
 // when the TUI is attached to a remote OpenCode service.
-import { Plugin } from "@opencode/plugin/tui"
+//
+// Shipped precompiled as dist/tui.js (scripts/build-tui.ts). Keep runtime
+// imports to solid-js and @opentui/*: the build points those at the host's
+// runtime, and nothing else is installed next to the plugin.
+import type { Plugin } from "@opencode/plugin/tui"
 import type { Context } from "@opencode/plugin/tui/context"
 import { createEffect, createSignal, For, Show } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
@@ -12,7 +16,7 @@ import { SchedulerRpc, type JobListOutput, type JobState, type JobSummary } from
 // event stream was disconnected.
 const REFRESH_MS = 30_000
 
-export default Plugin.define({
+const plugin: Plugin.Definition = {
   id: "opencode-scheduler.tui",
   setup(context) {
     const rpc = context.client.rpc(SchedulerRpc)
@@ -74,7 +78,9 @@ export default Plugin.define({
       removeSlot()
     }
   },
-})
+}
+
+export default plugin
 
 function JobsSection(props: { context: Context; jobs: JobSummary[]; now: number }) {
   const theme = () => props.context.theme
