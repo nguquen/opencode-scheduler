@@ -1,6 +1,6 @@
 {
   "name": "@nguquen/opencode-scheduler",
-  "version": "1.5.0",
+  "version": "1.6.1",
   "description": "OpenCode plugin (OpenCode 1 and 2) for scheduling recurring jobs using launchd, systemd, Task Scheduler, or cron fallback",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,16 +14,21 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
     }
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly",
+    "build": "bun build src/index.ts --outdir dist --target bun --format esm && bun scripts/build-tui.ts && tsc --emitDeclarationOnly",
     "clean": "rm -rf dist",
     "prepublishOnly": "bun run clean && bun run build",
     "release:patch": "npm version patch && npm publish",
     "release:minor": "npm version minor && npm publish",
     "release:major": "npm version major && npm publish",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "keywords": [
     "opencode",
@@ -49,8 +54,16 @@
     "@opencode-ai/plugin": "^1.0.162"
   },
   "devDependencies": {
+    "@babel/core": "^7.29.7",
+    "@babel/preset-typescript": "^7.29.7",
     "@opencode/plugin": "^2.0.21",
+    "@opencode/theme": "^2.0.21",
+    "@opentui/core": "^0.5.14",
+    "@opentui/solid": "^0.5.14",
+    "@types/babel__core": "^7.20.5",
+    "babel-preset-solid": "1.9.12",
     "bun-types": "latest",
+    "solid-js": "^1.9.12",
     "typescript": "^5.7.3"
   },
   "peerDependencies": {
