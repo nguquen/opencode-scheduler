@@ -26,6 +26,14 @@ const plugin: Plugin.Definition = {
     const inflight = new Set<string>()
     const pending = new Set<string>()
 
+    // Durable and live-synced across running TUIs.
+    const [view, setView] = context.storage.store("sidebar", { initial: { collapsed: false } })
+    const toggleCollapsed = () => {
+      void setView((draft) => {
+        draft.collapsed = !draft.collapsed
+      }).catch(() => {})
+    }
+
     const refresh = async (directory: string): Promise<void> => {
       if (inflight.has(directory)) {
         pending.add(directory)
@@ -68,21 +76,66 @@ const plugin: Plugin.Definition = {
           context.location?.directory ??
           context.data.location.default().directory
         createEffect(() => track(directory()))
-        return <JobsSection context={context} jobs={jobs[directory()] ?? []} now={now()} />
+        return (
+          <JobsSection
+            context={context}
+            jobs={jobs[directory()] ?? []}
+            now={now()}
+            collapsed={view.collapsed === true}
+            onToggle={toggleCollapsed}
+          />
+        )
       },
+    })
+
+    // `app` stays mounted for the whole TUI session, so the command is
+    // reachable from every route.
+    const removeCommands = context.ui.slot({
+      append: "app",
+      render: () => <Commands context={context} toggle={toggleCollapsed} />,
     })
 
     return () => {
       stopEvents()
       clearInterval(timer)
       removeSlot()
+      removeCommands()
     }
   },
 }
 
 export default plugin
 
-function JobsSection(props: { context: Context; jobs: JobSummary[]; now: number }) {
+// keymap.layer must run inside the host's component tree, not in setup(),
+// so this component exists only to own the layer.
+function Commands(props: { context: Context; toggle: () => void }) {
+  props.context.keymap.layer(() => ({
+    // The palette runs as a dialog, which leaves the base input mode.
+    mode: "global",
+    commands: [
+      {
+        id: "opencode-scheduler.sidebar.toggle",
+        title: "Scheduler: Toggle sidebar jobs",
+        description: "Collapse or expand the scheduled jobs section in the sidebar",
+        group: "Scheduler",
+        palette: true,
+        run: () => props.toggle(),
+      },
+    ],
+    bindings: [],
+  }))
+  return null
+}
+
+const ALERT_STATES = ["running", "failed", "stale"] as const
+
+function JobsSection(props: {
+  context: Context
+  jobs: JobSummary[]
+  now: number
+  collapsed: boolean
+  onToggle: () => void
+}) {
   const theme = () => props.context.theme
   const stateColor = (state: JobState) => {
     switch (state) {
@@ -99,13 +152,33 @@ function JobsSection(props: { context: Context; jobs: JobSummary[]; now: number 
     }
   }
 
+  // Collapsed, the header still surfaces anything that needs attention.
+  const alerts = () =>
+    ALERT_STATES.map((state) => ({ state, count: props.jobs.filter((job) => job.state === state).length })).filter(
+      (alert) => alert.count > 0
+    )
+
   return (
     <Show when={props.jobs.length > 0}>
       <box flexDirection="column">
-        <text fg={theme().text.base}>
-          <b>Scheduled jobs</b>
-        </text>
-        <For each={props.jobs}>
+        <box flexDirection="row" onMouseDown={() => props.onToggle()}>
+          <text fg={theme().text.base} wrapMode="none">
+            <b>{props.collapsed ? "▶" : "▼"} Scheduled jobs</b>
+          </text>
+          <text fg={theme().text.muted} wrapMode="none">
+            {` (${props.jobs.length})`}
+          </text>
+          <Show when={props.collapsed}>
+            <For each={alerts()}>
+              {(alert) => (
+                <text fg={stateColor(alert.state)} wrapMode="none">
+                  {`  ${STATE_ICON[alert.state]} ${alert.count}`}
+                </text>
+              )}
+            </For>
+          </Show>
+        </box>
+        <For each={props.collapsed ? [] : props.jobs}>
           {(job) => (
             <box flexDirection="column">
               <box flexDirection="row">
