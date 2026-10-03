@@ -48,6 +48,11 @@ last run. It updates when a job file or run lock changes, including runs the OS
 scheduler starts, and refreshes every 30 seconds. The section is hidden when the
 project has no jobs. It is read-only; manage jobs through the tools.
 
+Click the `▼ Scheduled jobs` header, or run **Scheduler: Toggle sidebar jobs** from the
+command palette, to collapse the section. Collapsed, the header keeps the job count and
+the number of running, failed and interrupted jobs. The choice is remembered across
+restarts.
+
 The TUI reads jobs from the server plugin over RPC, so it also works when attached to
 a remote OpenCode service.
 
