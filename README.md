@@ -35,6 +35,16 @@ OpenCode 2's `opencode run` dropped several flags, so on OpenCode 2:
 - The job directory reaches `run` through the working directory and `PWD`, not `--dir`.
 - Runs never wait for input: `run` cancels questions and rejects permission requests
   with feedback, and the model carries on. `OPENCODE_PERMISSION` is not read.
+- `prompt` is sent as one line: newlines and runs of whitespace become single spaces.
+- No word of `prompt` may start with `-` followed by more characters (`-c`, `--`,
+  `--continue`, `-5`): `run` would read it as a flag, so `schedule_job`, `update_job`
+  and `run_job` refuse it. Reword it ("minus 5", or put it after a letter). A lone `-`
+  is fine. The prompt goes to `run` as separate words without a `--` separator,
+  because `run` sends the words after `--` twice.
+
+Jobs created on OpenCode 2 before 1.6.4 stored the `--` form. The plugin rewrites them
+when it loads, so they need no update; a job whose prompt has a word like the above
+keeps its old invocation and logs a warning until the prompt is reworded.
 
 Jobs store the invocation built for the host that created them, so keep OpenCode 1 and
 OpenCode 2 job storage (`~/.config/opencode/scheduler`) and scheduler units apart if
