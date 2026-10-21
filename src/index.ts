@@ -22,6 +22,13 @@ import { homedir, platform } from "os"
 import { execFileSync, execSync, spawn, type ChildProcess } from "child_process"
 import { fileURLToPath } from "url"
 import { nextCronRun, parseCronField, splitCronExpression, validateCronExpression } from "./cron"
+import {
+  buildOpencodeV2Args,
+  migrateV2Invocations,
+  validateV2Prompt,
+  type JobRunSpec,
+  type OpencodeRunFormat,
+} from "./invocation"
 import { SchedulerRpc, type JobState, type JobSummary } from "./rpc"
 import { SUPERVISOR_SCRIPT } from "./supervisor"
 
@@ -157,9 +164,22 @@ function refreshSupervisorScript(): void {
   }
 }
 
-// Job type
+// Jobs created before 1.6.4 on OpenCode 2 stored `run … -- <prompt words>`,
+// which OpenCode 2 sends as the prompt twice. supervisor.pl only executes the
+// stored invocation, so rewrite it when the plugin loads.
+function migrateStoredInvocations(): void {
+  try {
+    migrateV2Invocations(SCOPES_DIR, (raw) => {
+      const job = normalizeJob(raw)
+      if (!job) throw new Error("not a job")
+      return normalizeRunSpec(getJobRun(job))
+    })
+  } catch (error) {
+    console.error("[opencode-scheduler] cannot migrate job invocations:", error)
+  }
+}
 
-type OpencodeRunFormat = "default" | "json"
+// Job type
 
 type SchedulerEnvConfig = {
   preserve?: string[]
@@ -169,25 +189,6 @@ type SchedulerEnvConfig = {
 
 type SchedulerConfig = {
   env?: SchedulerEnvConfig
-}
-
-interface JobRunSpec {
-  prompt?: string
-  slashCommand?: string
-  slashCommandArgs?: string
-
-  files?: string[]
-  agent?: string
-  model?: string
-  variant?: string
-  title?: string
-  share?: boolean
-  continue?: boolean
-  session?: string
-  runFormat?: OpencodeRunFormat
-
-  attachUrl?: string
-  port?: number
 }
 
 type JobInvocation = {
@@ -1819,6 +1820,14 @@ function validateRunSpec(run: JobRunSpec): void {
   }
 }
 
+// validateRunSpec plus the rules of the host's `opencode run`. Kept out of
+// validateRunSpec, which also runs when job files are loaded: a stored job
+// must stay readable even when the host would refuse its prompt.
+function validateRunSpecForHost(run: JobRunSpec): void {
+  validateRunSpec(run)
+  if (HOST_GENERATION === 2) validateV2Prompt(run.prompt)
+}
+
 function getJobRun(job: Job): JobRunSpec {
   if (job.run) {
     return job.run
@@ -2123,44 +2132,6 @@ function buildOpencodeArgs(job: Job): { command: string; args: string[] } {
   args.push("--", ...words)
 
   return { command, args }
-}
-
-// OpenCode 2 `run`: the directory comes from PWD/cwd (the supervisor and
-// run_job set both to the job workdir), the server from --server or the
-// background service, and the variant rides on the model as provider/model#variant.
-// Questions are cancelled and permission asks rejected without --auto, which
-// matches the OpenCode 1 `question: deny` policy, so no extra flag is needed.
-function buildOpencodeV2Args(run: JobRunSpec): string[] {
-  const unsupported = [
-    run.slashCommand && "slashCommand (OpenCode 2 `run` has no --command; put the instructions in prompt)",
-    run.port !== undefined && "port (OpenCode 2 `run` has no --port)",
-    run.share && "share (OpenCode 2 `run` has no --share)",
-  ].filter(Boolean)
-  if (unsupported.length) {
-    throw new Error(`Not supported on OpenCode 2: ${unsupported.join("; ")}`)
-  }
-  if (run.variant && !run.model) {
-    throw new Error("OpenCode 2 selects a variant through the model (provider/model#variant); set model too")
-  }
-  if (run.variant && run.model?.includes("#")) {
-    throw new Error("Set the variant either in model (provider/model#variant) or in variant, not both")
-  }
-
-  const args = ["run"]
-  if (run.attachUrl) args.push("--server", run.attachUrl)
-  if (run.agent) args.push("--agent", run.agent)
-  if (run.model) args.push("--model", run.variant ? `${run.model}#${run.variant}` : run.model)
-  if (run.runFormat) args.push("--format", run.runFormat)
-  if (run.title) args.push("--title", run.title)
-  if (run.continue) args.push("--continue")
-  if (run.session) args.push("--session", run.session)
-  for (const file of run.files ?? []) args.push("--file", file)
-
-  // Same word splitting as OpenCode 1: `run` quote-wraps any argument that
-  // contains a space.
-  const words = (run.prompt ?? "").split(/\s+/).filter(Boolean)
-  args.push("--", ...words)
-  return args
 }
 
 function buildRunEnvironment(): NodeJS.ProcessEnv {
@@ -2653,7 +2624,7 @@ const TOOLS = {
            }
 
            try {
-             validateRunSpec(normalizeRunSpec(run))
+             validateRunSpecForHost(normalizeRunSpec(run))
            } catch (error) {
              const msg = error instanceof Error ? error.message : String(error)
              return errorResult(format, `Invalid run spec: ${msg}`)
@@ -3028,6 +2999,7 @@ Commands:
 
           try {
             updates.run = normalizeRunSpec(nextRunCandidate)
+            validateRunSpecForHost(updates.run)
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error)
             return errorResult(format, `Invalid run spec: ${msg}`)
@@ -3277,7 +3249,7 @@ Commands:
           let runOverride: JobRunSpec
           try {
             runOverride = normalizeRunSpec(overrideCandidate)
-            validateRunSpec(runOverride)
+            validateRunSpecForHost(runOverride)
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error)
             return errorResult(format, `Invalid run override: ${msg}`)
@@ -3365,6 +3337,7 @@ const SchedulerPlugin: Plugin = async () => {
 async function setupV2(ctx: PluginV2Context): Promise<() => Promise<void>> {
   HOST_GENERATION = 2
   refreshSupervisorScript()
+  migrateStoredInvocations()
   const definitions = Object.entries(TOOLS).map(([name, definition]) => {
     const schema = tool.schema.object(definition.args)
     const { $schema: _ignored, ...input } = tool.schema.toJSONSchema(schema) as Record<string, unknown>
